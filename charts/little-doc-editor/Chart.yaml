@@ -2,6 +2,6 @@ apiVersion: v2
 name: little-doc-editor
 description: Self-hosted collaborative documentation/knowledge-base platform
 type: application
-version: 0.2.1
-appVersion: 0.2.1
+version: 0.2.2
+appVersion: 0.2.2
 kubeVersion: '>=1.36.0-0'
