@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/TaliaMarine/little-doc-editor/compare/v0.2.1...v0.2.2) (2026-11-23)
+
+
+### Bug Fixes
+
+* **docker:** distroless debian13 for api; drop npm from collab runtime image (bundled CVEs) ([45ed107](https://github.com/TaliaMarine/little-doc-editor/commit/45ed10758a447e5399a1394093ba6d14c5c92c09))
+
 ## [0.2.1](https://github.com/TaliaMarine/little-doc-editor/compare/v0.2.0...v0.2.1) (2026-11-23)
 
 
