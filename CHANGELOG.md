@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/TaliaMarine/little-doc-editor/compare/v0.3.0...v0.3.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **frontend:** build static assets on the build platform (arm64 emulation hangs) ([4bebe56](https://github.com/TaliaMarine/little-doc-editor/commit/4bebe56140c08559efa6aac434098693a82cc4a6))
+
 ## [0.3.0](https://github.com/TaliaMarine/little-doc-editor/compare/v0.2.2...v0.3.0) (2026-11-23)
 
 
