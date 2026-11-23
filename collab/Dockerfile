@@ -8,7 +8,7 @@ RUN npm run build
 FROM node:24-alpine
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=build /src/package.json ./
+COPY --from=build /src/package.json /src/package-lock.json ./
 COPY --from=build /src/dist ./dist
 RUN npm ci --omit=dev
 USER node
