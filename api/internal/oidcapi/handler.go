@@ -133,6 +133,14 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
+	// The IdP refused the request (user denied, misconfiguration, …): send the
+	// browser back to the login page rather than showing raw JSON.
+	if e := r.URL.Query().Get("error"); e != "" {
+		h.logger.Warn("oidc provider returned an error", "error", e, "description", r.URL.Query().Get("error_description"))
+		http.SetCookie(w, &http.Cookie{Name: flowCookieName, Value: "", MaxAge: -1, Path: "/", HttpOnly: true, Secure: h.secureCookies(r)})
+		http.Redirect(w, r, h.loginErrorURL(), http.StatusFound)
+		return
+	}
 	cookie, err := r.Cookie(flowCookieName)
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "missing login flow cookie — the login attempt may have expired")
@@ -223,6 +231,16 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	// sent to servers or written to access logs, unlike a query string.
 	frag := url.Values{"token": {token}, "displayName": {user.DisplayName}}
 	http.Redirect(w, r, h.postLoginURL()+"#"+frag.Encode(), http.StatusFound)
+}
+
+// loginErrorURL is the SPA login page with the SSO-failed flag set.
+func (h *Handler) loginErrorURL() string {
+	u, err := url.Parse(h.postLoginURL())
+	if err != nil {
+		return "/login?sso_error=1"
+	}
+	u.Path, u.RawQuery, u.Fragment = "/login", "sso_error=1", ""
+	return u.String()
 }
 
 func (h *Handler) postLoginURL() string {
