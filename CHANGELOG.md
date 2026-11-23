@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/TaliaMarine/little-doc-editor/compare/v0.2.0...v0.2.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* **docker:** apply Alpine security updates in runtime images ([58fc29c](https://github.com/TaliaMarine/little-doc-editor/commit/58fc29c7acbba311fa2914eb3de5bf1836f3a509))
+
 ## [0.2.0](https://github.com/TaliaMarine/little-doc-editor/compare/v0.1.0...v0.2.0) (2026-11-23)
 
 
