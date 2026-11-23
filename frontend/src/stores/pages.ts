@@ -1,10 +1,10 @@
-import type { components } from '@/api/schema'
+import type { Page as ApiPage, PageTreeItem as ApiPageTreeItem } from '@/api/generated'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/api/client'
+import { createPage as apiCreatePage, getPage, listPagesBySpace, updatePageContent } from '@/api/generated'
 
-export type PageTreeItem = components['schemas']['PageTreeItem']
-export type Page = components['schemas']['Page']
+export type PageTreeItem = ApiPageTreeItem
+export type Page = ApiPage
 
 export const usePagesStore = defineStore('pages', () => {
   // Keyed by spaceId: the tree nav only ever shows one space at a time, but
@@ -20,13 +20,11 @@ export const usePagesStore = defineStore('pages', () => {
   async function fetchTree (spaceId: string) {
     treeLoading.value = true
     try {
-      const { data, error } = await api.GET('/spaces/{spaceId}/pages', {
-        params: { path: { spaceId } },
-      })
+      const { data, error } = await listPagesBySpace({ path: { spaceId } })
       if (error) {
         throw new Error(error.error ?? 'Failed to load pages')
       }
-      treesBySpace.value[spaceId] = data
+      treesBySpace.value[spaceId] = data ?? []
     } finally {
       treeLoading.value = false
     }
@@ -40,13 +38,11 @@ export const usePagesStore = defineStore('pages', () => {
       currentPage.value = null
     }
     try {
-      const { data, error } = await api.GET('/pages/{pageId}', {
-        params: { path: { pageId } },
-      })
+      const { data, error } = await getPage({ path: { pageId } })
       if (error) {
         throw new Error(error.error ?? 'Failed to load page')
       }
-      currentPage.value = data
+      currentPage.value = data ?? null
       return data
     } finally {
       pageLoading.value = false
@@ -54,20 +50,20 @@ export const usePagesStore = defineStore('pages', () => {
   }
 
   async function savePage (pageId: string, title: string, content: Record<string, unknown>) {
-    const { data, error } = await api.PUT('/pages/{pageId}/content', {
-      params: { path: { pageId } },
+    const { data, error } = await updatePageContent({
+      path: { pageId },
       body: { title, content },
     })
     if (error) {
       throw new Error(error.error ?? 'Failed to save page')
     }
-    currentPage.value = data
+    currentPage.value = data ?? null
     return data
   }
 
   async function createPage (spaceId: string, title: string, parentId: string | null) {
-    const { data, error } = await api.POST('/spaces/{spaceId}/pages', {
-      params: { path: { spaceId } },
+    const { data, error } = await apiCreatePage({
+      path: { spaceId },
       body: { title, parentId, content: { type: 'doc', content: [] } },
     })
     if (error) {

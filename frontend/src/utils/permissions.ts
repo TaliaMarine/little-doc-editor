@@ -1,7 +1,6 @@
-import type { components } from '@/api/schema'
+import type { SpaceRole as ApiSpaceRole, Page } from '@/api/generated'
 
-export type SpaceRole = components['schemas']['SpaceRole']
-type Page = components['schemas']['Page']
+export type SpaceRole = ApiSpaceRole
 
 // Mirrors api/internal/authz's ordering (Decision 24). Admin and owner are
 // the same tier for every check the server makes; they're ranked here only

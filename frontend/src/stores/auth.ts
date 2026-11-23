@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { api, setAuthToken, setUnauthorizedHandler } from '@/api/client'
+import { setAuthToken, setUnauthorizedHandler } from '@/api/client'
+import { login as apiLogin, getMe } from '@/api/generated'
 
 const STORAGE_KEY = 'little-doc-editor.session'
 
@@ -72,20 +73,18 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function login (email: string, password: string) {
-    const { data, error } = await api.POST('/auth/login', {
-      body: { email, password },
-    })
+    const { data, error } = await apiLogin({ body: { email, password } })
     if (error) {
       throw new Error(error.error ?? 'Login failed')
     }
-    applySession(data)
+    applySession(data!)
   }
 
   // Completes an OIDC login: the api redirected back with the session token
   // in the URL fragment. isOrgAdmin isn't in the fragment, so ask /auth/me.
   async function loginWithToken (sessionToken: string, name: string) {
     applySession({ token: sessionToken, displayName: name, isOrgAdmin: false })
-    const { data, error } = await api.GET('/auth/me')
+    const { data, error } = await getMe()
     if (error || !data) {
       logout()
       throw new Error('Login failed')

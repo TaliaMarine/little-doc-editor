@@ -1,9 +1,9 @@
-import type { components } from '@/api/schema'
+import type { Space as ApiSpace } from '@/api/generated'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/api/client'
+import { listSpaces } from '@/api/generated'
 
-export type Space = components['schemas']['Space']
+export type Space = ApiSpace
 
 export const useSpacesStore = defineStore('spaces', () => {
   const spaces = ref<Space[]>([])
@@ -12,11 +12,11 @@ export const useSpacesStore = defineStore('spaces', () => {
   async function fetchSpaces () {
     loading.value = true
     try {
-      const { data, error } = await api.GET('/spaces')
+      const { data, error } = await listSpaces()
       if (error) {
         throw new Error(error.error ?? 'Failed to load spaces')
       }
-      spaces.value = data
+      spaces.value = data ?? []
     } finally {
       loading.value = false
     }

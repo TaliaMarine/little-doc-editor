@@ -45,7 +45,7 @@
   import { onMounted, ref } from 'vue'
   import { useI18n } from 'vue-i18n'
   import { useRoute, useRouter } from 'vue-router'
-  import { api } from '@/api/client'
+  import { getOidcStatus } from '@/api/generated'
   import { useAuthStore } from '@/stores/auth'
 
   const { t } = useI18n()
@@ -60,7 +60,7 @@
 
   const oidcEnabled = ref(false)
   onMounted(async () => {
-    const { data } = await api.GET('/auth/oidc/status')
+    const { data } = await getOidcStatus()
     oidcEnabled.value = data?.enabled ?? false
     if (route.query.sso_error) {
       errorMessage.value = t('login.ssoFailed')
