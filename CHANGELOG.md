@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/TaliaMarine/little-doc-editor/compare/v0.2.2...v0.3.0) (2026-11-23)
+
+
+### Features
+
+* OIDC group-&gt;admin mapping, default member role, profile info ([258e6a3](https://github.com/TaliaMarine/little-doc-editor/commit/258e6a37571752b04777840ebedf4bdfc0b4a0de))
+
+
+### Bug Fixes
+
+* **api:** redirect OIDC provider errors to the login page ([22401b0](https://github.com/TaliaMarine/little-doc-editor/commit/22401b0f8cc6585a31574682f826991cbd85482d))
+
 ## [0.2.2](https://github.com/TaliaMarine/little-doc-editor/compare/v0.2.1...v0.2.2) (2026-11-23)
 
 
