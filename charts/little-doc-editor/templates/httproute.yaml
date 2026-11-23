@@ -1,0 +1,72 @@
+{{/*
+Gateway API alternative to Ingress, independently toggled (Decision 25).
+References an existing Gateway rather than creating one — this chart doesn't
+own cluster-level Gateway provisioning.
+*/}}
+{{- if .Values.gatewayApi.enabled }}
+{{- if .Values.gatewayApi.frontend.hostnames }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-frontend
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gatewayApi.gatewayRef.name }}
+      {{- with .Values.gatewayApi.gatewayRef.namespace }}
+      namespace: {{ . }}
+      {{- end }}
+  hostnames:
+    {{- toYaml .Values.gatewayApi.frontend.hostnames | nindent 4 }}
+  rules:
+    - backendRefs:
+        - name: {{ include "little-doc-editor.fullname" . }}-frontend
+          port: {{ .Values.frontend.service.port }}
+---
+{{- end }}
+{{- if .Values.gatewayApi.api.hostnames }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-api
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gatewayApi.gatewayRef.name }}
+      {{- with .Values.gatewayApi.gatewayRef.namespace }}
+      namespace: {{ . }}
+      {{- end }}
+  hostnames:
+    {{- toYaml .Values.gatewayApi.api.hostnames | nindent 4 }}
+  rules:
+    # WS-upgrade traffic (api's presence channel): attach any timeout policy
+    # your Gateway class supports at this rule, per SPEC.md §7.4.
+    - backendRefs:
+        - name: {{ include "little-doc-editor.fullname" . }}-api
+          port: {{ .Values.api.service.port }}
+---
+{{- end }}
+{{- if .Values.gatewayApi.collab.hostnames }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-collab
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gatewayApi.gatewayRef.name }}
+      {{- with .Values.gatewayApi.gatewayRef.namespace }}
+      namespace: {{ . }}
+      {{- end }}
+  hostnames:
+    {{- toYaml .Values.gatewayApi.collab.hostnames | nindent 4 }}
+  rules:
+    # Full Yjs WS stream — the most timeout-sensitive route in the chart.
+    - backendRefs:
+        - name: {{ include "little-doc-editor.fullname" . }}-collab
+          port: {{ .Values.collab.service.port }}
+{{- end }}
+{{- end }}

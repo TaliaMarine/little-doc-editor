@@ -1,0 +1,8 @@
+little-doc-editor has been deployed.
+
+Frontend: {{ if .Values.ingress.frontend.host }}https://{{ .Values.ingress.frontend.host }}{{ else }}kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "little-doc-editor.fullname" . }}-frontend {{ .Values.frontend.service.port }}:{{ .Values.frontend.service.port }}{{ end }}
+
+Remember:
+- Postgres, Redis, and S3-compatible storage are all bring-your-own — this chart never bundles them.
+- collab holds in-memory CRDT room state per replica; configure sticky sessions on your ingress controller/Gateway class (see values.yaml comments near `collab.stickySessionsNote`).
+- On first install, bootstrap the admin account via the api service's CLI/break-glass path (internal login), then configure OIDC if desired.

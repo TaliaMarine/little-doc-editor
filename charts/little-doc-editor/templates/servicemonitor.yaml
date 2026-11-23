@@ -1,0 +1,27 @@
+{{/*
+Only created if BOTH the values toggle is on AND the Prometheus Operator
+CRD is actually present in the cluster (Decision 27) — the two gates are
+independent on purpose, so enabling the toggle against a cluster without the
+CRD doesn't produce a broken/orphaned resource.
+*/}}
+{{- if and .Values.observability.serviceMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+spec:
+  # api only: the frontend is a static SPA with nothing to scrape, and
+  # collab's Service port is named "ws" — add a second endpoint for it once
+  # collab actually serves /metrics.
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "little-doc-editor.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.observability.serviceMonitor.interval }}
+{{- end }}

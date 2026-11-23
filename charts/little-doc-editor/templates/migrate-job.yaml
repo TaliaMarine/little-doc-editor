@@ -1,0 +1,37 @@
+{{/*
+Runs database migrations via a Helm pre-upgrade/pre-install hook Job
+(SPEC.md §7.1) — migrations are never baked into the api container's own
+entrypoint, and there is no separate CronJob for this (it's a one-shot hook,
+distinct from the in-process history-cleanup schedule, Decision 28).
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-migrate
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "little-doc-editor.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.imageRegistry }}{{ .Values.api.image.repository }}:{{ .Values.api.image.tag | default .Chart.AppVersion }}"
+          command: ["/migrate"]
+          args: ["-path", "/db/migrations", "-direction", "up"]
+          env:
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "DATABASE_URL" "field" .Values.postgres.dsn "generatedKey" "postgres-dsn") | nindent 12 }}

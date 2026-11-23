@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-collab
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collab
+spec:
+  replicas: {{ .Values.collab.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "little-doc-editor.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: collab
+  template:
+    metadata:
+      labels:
+        {{- include "little-doc-editor.labels" . | nindent 8 }}
+        app.kubernetes.io/component: collab
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: collab
+          image: "{{ .Values.imageRegistry }}{{ .Values.collab.image.repository }}:{{ .Values.collab.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.collab.image.pullPolicy }}
+          ports:
+            - name: ws
+              containerPort: {{ .Values.collab.service.port }}
+          env:
+            - name: PORT
+              value: {{ .Values.collab.service.port | quote }}
+            - name: REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "DATABASE_URL" "field" .Values.postgres.dsn "generatedKey" "postgres-dsn") | nindent 12 }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "SESSION_JWT_SECRET" "field" .Values.sessionJWT "generatedKey" "session-jwt-secret") | nindent 12 }}
+            {{- if or .Values.redis.auth.value .Values.redis.auth.existingSecret.name }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "REDIS_PASSWORD" "field" .Values.redis.auth "generatedKey" "redis-auth") | nindent 12 }}
+            {{- end }}
+          # No HTTP health endpoint yet on the Hocuspocus server beyond the WS
+          # upgrade path itself; a TCP check is the safe default until one's
+          # added.
+          readinessProbe:
+            tcpSocket:
+              port: ws
+          livenessProbe:
+            tcpSocket:
+              port: ws
+          resources:
+            {{- toYaml .Values.collab.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-collab
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: collab
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "little-doc-editor.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: collab
+  ports:
+    - name: ws
+      port: {{ .Values.collab.service.port }}
+      targetPort: ws

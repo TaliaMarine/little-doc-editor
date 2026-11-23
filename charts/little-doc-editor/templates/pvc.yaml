@@ -1,0 +1,19 @@
+{{- if and (eq .Values.storage.backend "filesystem") (not .Values.api.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-attachments
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml .Values.api.persistence.accessModes | nindent 4 }}
+  {{- with .Values.api.persistence.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.api.persistence.size }}
+{{- end }}

@@ -1,0 +1,29 @@
+# Go
+api/bin/
+*.test
+*.out
+
+# Node
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Env
+.env
+.env.local
+*.local
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Helm
+charts/**/charts/*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.idea/

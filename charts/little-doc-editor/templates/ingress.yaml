@@ -1,0 +1,104 @@
+{{/*
+Vendor-neutral Ingress: no controller-specific defaults baked in, just the
+generic annotations map the operator provides (Decision 25). frontend and
+api/collab are independently configurable since the latter carry WS-upgrade
+traffic and typically need different timeout annotations.
+*/}}
+{{- if .Values.ingress.enabled }}
+{{- if .Values.ingress.frontend.host }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-frontend
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.frontend.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "little-doc-editor.fullname" . }}-frontend
+                port:
+                  number: {{ .Values.frontend.service.port }}
+  {{- if .Values.ingress.frontend.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.ingress.frontend.host }}]
+      secretName: {{ .Values.ingress.frontend.tls.secretName }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.ingress.api.host }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-api
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+  annotations:
+    {{- $merged := merge (dict) .Values.ingress.annotations .Values.ingress.api.annotations }}
+    {{- toYaml $merged | nindent 4 }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.api.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "little-doc-editor.fullname" . }}-api
+                port:
+                  number: {{ .Values.api.service.port }}
+  {{- if .Values.ingress.api.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.ingress.api.host }}]
+      secretName: {{ .Values.ingress.api.tls.secretName }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.ingress.collab.host }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-collab
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+  annotations:
+    {{- $merged := merge (dict) .Values.ingress.annotations .Values.ingress.collab.annotations }}
+    {{- toYaml $merged | nindent 4 }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.collab.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "little-doc-editor.fullname" . }}-collab
+                port:
+                  number: {{ .Values.collab.service.port }}
+  {{- if .Values.ingress.collab.tls.enabled }}
+  tls:
+    - hosts: [{{ .Values.ingress.collab.host }}]
+      secretName: {{ .Values.ingress.collab.tls.secretName }}
+  {{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: API (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: api/go.mod
+          cache-dependency-path: api/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: gofmt -l . | tee /tmp/gofmt.out && test ! -s /tmp/gofmt.out
+      - run: go test ./... -race
+      - name: Integration tests (testcontainers)
+        run: go test -tags integration -race -timeout 20m ./...
+
+  frontend:
+    name: Frontend (Vue)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint -- --max-warnings=0
+      - run: npm test
+      - name: Generated API client is up to date
+        run: |
+          npm run generate:api
+          git diff --exit-code -- src/api
+      - run: npm run build
+
+  collab:
+    name: Collab (Node)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: collab
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: collab/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+      - run: helm lint charts/little-doc-editor --set postgres.dsn.value=x --set s3.bucket=b
+      - name: Render configurations
+        run: |
+          set -euo pipefail
+          c=charts/little-doc-editor
+          base="--set postgres.dsn.value=x"
+          helm template t $c $base --set s3.bucket=b
+          helm template t $c $base --set storage.backend=filesystem
+          helm template t $c $base --set storage.backend=filesystem \
+            --set oidc.enabled=true --set oidc.issuer=https://idp.example.com/ \
+            --set oidc.clientID=x --set oidc.redirectURL=https://docs.example.com/api/v1/auth/oidc/callback \
+            | tee /tmp/oidc.yaml
+          if grep -q OIDC_CLIENT_SECRET /tmp/oidc.yaml; then
+            echo "::error::public OIDC client must not render OIDC_CLIENT_SECRET"; exit 1
+          fi
+
+  docker:
+    name: Docker build (${{ matrix.component }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, frontend, collab]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.component }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}

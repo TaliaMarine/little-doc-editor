@@ -1,0 +1,243 @@
+# little-doc-editor Helm chart values.
+#
+# This chart never bundles Postgres or Redis (Decisions 18, 29) — it only
+# ever consumes connection secrets for externally provisioned instances.
+# Every credential-shaped value below supports EITHER an inline `value` OR a
+# reference to an existing Kubernetes Secret via `existingSecret.{name,key}`
+# (Decision 19), so it composes with the External Secrets Operator without
+# the chart fighting an ESO-managed Secret. See docs/external-secrets-example.yaml.
+
+imageRegistry: ""
+imagePullSecrets: []
+
+# --- External PostgreSQL (Decision 18: bring-your-own only) ---
+postgres:
+  # Full pgx-compatible DSN, credential-shaped: inline OR existingSecret.
+  dsn:
+    value: ""
+    existingSecret:
+      name: ""
+      key: ""
+
+# --- External Redis (Decisions 3, 20, 29: bring-your-own, collab fan-out + shared session/presence state) ---
+redis:
+  addr: ""   # host:port, not secret-shaped
+  # Redis AUTH password, passed to collab (the only service that talks to
+  # Redis) as REDIS_PASSWORD. Leave empty for a Redis without auth.
+  auth:
+    value: ""
+    existingSecret:
+      name: ""
+      key: ""
+
+# --- Attachment storage backend ---
+# "s3" (default, Decision 5) uses the s3.* values below. "filesystem" keeps
+# attachment bytes on a PersistentVolumeClaim mounted into the api pods
+# (api.persistence) — for small installs without an object store. A ReadWriteOnce
+# volume only supports a single api replica; use ReadWriteMany storage to scale out.
+storage:
+  backend: s3
+
+# --- S3-compatible object storage (Decision 5, used when storage.backend=s3) ---
+s3:
+  endpoint: ""
+  bucket: ""   # required — api refuses to start without it
+  region: ""
+  # true for MinIO and most non-AWS S3-compatible stores; set false for AWS
+  # S3 virtual-hosted-style addressing.
+  usePathStyle: true
+  accessKey:
+    value: ""
+    existingSecret:
+      name: ""
+      key: ""
+  secretKey:
+    value: ""
+    existingSecret:
+      name: ""
+      key: ""
+
+# --- OIDC (Decision 14: single instance-wide issuer) ---
+oidc:
+  enabled: false
+  issuer: ""
+  clientID: ""
+  # OPTIONAL. Leave empty (the default) for a public client that authenticates
+  # with PKCE only — no secret is sent or stored. Only set this if your
+  # identity provider insists on a confidential client.
+  clientSecret:
+    value: ""
+    existingSecret:
+      name: ""
+      key: ""
+  # This deployment's own OIDC callback URL, registered with the identity
+  # provider, e.g. https://docs.example.com/api/v1/auth/oidc/callback.
+  redirectURL: ""
+  # Where the browser lands after login (defaults to /auth/callback on the
+  # redirectURL's origin).
+  postLoginURL: ""
+
+# --- Session signing (shared between api and collab, SPEC.md §4) ---
+# api issues session tokens (login, share-link redemption); collab validates
+# the same tokens on WS connect before letting a client join a document
+# room — both MUST use the identical secret, hence one shared value here
+# rather than two independent per-service fields.
+sessionJWT:
+  value: ""
+  existingSecret:
+    name: ""
+    key: ""
+  # How long an issued session token stays valid.
+  ttl: 24h
+
+# --- Bootstrap admin (Decision 11: admin-invite-only signup) ---
+# Creates the first internal org-admin account on startup if one doesn't
+# already exist — idempotent, safe to leave set across upgrades. Needed
+# because admin-invite-only signup means someone has to send the first
+# invite; this is that first account. Leave email empty to disable.
+bootstrapAdmin:
+  email: ""
+  password:
+    value: ""
+    existingSecret:
+      name: ""
+      key: ""
+
+# --- api service ---
+api:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/taliamarine/little-doc-editor-api
+    tag: ""
+    pullPolicy: IfNotPresent
+  service:
+    port: 8080
+  resources: {}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  logLevel: info
+  # PVC for attachment bytes when storage.backend=filesystem.
+  persistence:
+    size: 10Gi
+    storageClassName: ""
+    accessModes: [ReadWriteOnce]
+    existingClaim: ""
+    mountPath: /data/attachments
+  # Attachment upload policy (Decision 17). An empty allowlist keeps the
+  # api's built-in default (images, PDF, common Office formats, zip, plain
+  # text/code); entries are sniffed MIME types, e.g. ["image/png",
+  # "application/pdf"].
+  attachments:
+    allowlist: []
+    maxSizeBytes: 26214400   # 25MB
+  # Break-glass path to re-enable internal login if OIDC misconfigures
+  # (Decision 14) — an env var/CLI flag on the pod, never a DB-only toggle.
+  internalLoginBreakGlass: false
+
+# --- frontend service ---
+frontend:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/taliamarine/little-doc-editor-frontend
+    tag: ""
+    pullPolicy: IfNotPresent
+  service:
+    port: 8080
+  resources: {}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+# --- collab service ---
+collab:
+  replicaCount: 2
+  image:
+    repository: ghcr.io/taliamarine/little-doc-editor-collab
+    tag: ""
+    pullPolicy: IfNotPresent
+  service:
+    port: 1234
+  resources: {}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 75
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # collab holds in-memory CRDT room state per replica (§7.4) — sticky
+  # sessions are the operator's responsibility for their ingress
+  # controller/Gateway class (Decision 25); this chart doesn't enforce it.
+  # Add the relevant annotation/policy for your controller here or via
+  # ingress.annotations / gatewayApi, e.g. for nginx:
+  #   nginx.ingress.kubernetes.io/affinity: cookie
+  stickySessionsNote: "See the top-level sessionJWT value — operator-configured sticky sessions, not chart-enforced."
+
+# --- Ingress (vendor-neutral: no controller-specific defaults, Decision 25) ---
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  frontend:
+    host: ""
+    tls:
+      enabled: false
+      secretName: ""
+  api:
+    host: ""
+    # api/collab routes carry WS upgrades (the presence channel in api, and
+    # the full Yjs stream in collab) — set your controller's WS-upgrade
+    # timeouts/annotations here, e.g. for nginx:
+    #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    annotations: {}
+    tls:
+      enabled: false
+      secretName: ""
+  collab:
+    host: ""
+    annotations: {}
+    tls:
+      enabled: false
+      secretName: ""
+
+# --- Gateway API (independent toggle from ingress, Decision 25) ---
+gatewayApi:
+  enabled: false
+  gatewayRef:
+    name: ""
+    namespace: ""
+  frontend:
+    hostnames: []
+  api:
+    hostnames: []
+    # See ingress.api's comment above — the same WS-upgrade-friendly timeout
+    # concern applies here via your Gateway class's policy attachment.
+  collab:
+    hostnames: []
+
+# --- Observability (Decision 27) ---
+observability:
+  serviceMonitor:
+    # Only created if the Prometheus Operator CRD is actually present in
+    # the cluster (checked via .Capabilities in templates/servicemonitor.yaml)
+    # AND this is enabled — the two are independent gates on purpose.
+    # NOTE: neither api nor collab serves /metrics yet (see NEXT.md) —
+    # enabling this today yields a failing scrape target.
+    enabled: false
+    interval: 30s
+  otel:
+    enabled: false
+    endpoint: ""   # OTLP exporter endpoint, e.g. otel-collector.observability:4317

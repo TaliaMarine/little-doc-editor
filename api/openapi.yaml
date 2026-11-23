@@ -1,0 +1,555 @@
+openapi: 3.0.3
+info:
+  title: little-doc-editor API
+  version: "0.1.0"
+  description: >-
+    REST contract for the `api` service (SPEC.md §3). This spec is seeded
+    incrementally — only endpoints the frontend has actually integrated
+    against are documented so far; treat drift between this file and the Go
+    handlers as a bug (see .claude/skills/new-domain-endpoint), not a
+    formatting nitpick, but an undocumented handler here just means it
+    hasn't been touched by a frontend integration slice yet.
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      summary: Internal (password) login.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Login succeeded.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401":
+          description: Wrong email/password.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Account disabled, or internal login disabled instance-wide.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/oidc/status:
+    get:
+      operationId: getOidcStatus
+      summary: Whether OIDC (SSO) login is enabled on this instance.
+      security: []
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled]
+                properties:
+                  enabled: { type: boolean }
+
+  /auth/me:
+    get:
+      operationId: getMe
+      summary: The current session's identity.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401":
+          description: Missing or invalid bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /spaces:
+    get:
+      operationId: listSpaces
+      summary: List spaces the caller can see (all spaces for org admins, else spaces they're a member of).
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Space" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createSpace
+      summary: Create a space. Org-admin only; the creator becomes the space's first owner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, slug]
+              properties:
+                name: { type: string }
+                slug: { type: string }
+                icon: { type: string }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Space" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller is not an org admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: A space with this slug already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /spaces/{spaceId}:
+    get:
+      operationId: getSpace
+      summary: Get a space by ID. Requires viewer+ space role.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Space" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks viewer+ role in this space.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /spaces/{spaceId}/pages:
+    get:
+      operationId: listPagesBySpace
+      summary: >-
+        Every page in the space, flattened (no content field) — backs the
+        sidebar tree nav, which reconstructs parent/child structure
+        client-side from parentId. Requires viewer+ space role.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PageTreeItem" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks viewer+ role in this space.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    post:
+      operationId: createPage
+      summary: Create a page in a space. Requires editor+ space role.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                parentId: { type: string, format: uuid, nullable: true }
+                title: { type: string }
+                content:
+                  description: ProseMirror/Tiptap JSON (SPEC.md Decision 4).
+                  type: object
+                  additionalProperties: true
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks editor+ role in this space.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Space not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /pages/{pageId}:
+    get:
+      operationId: getPage
+      summary: >-
+        Get a page, including its content. Requires viewer+ space role, OR a
+        valid share-link guest session scoped to this page or an ancestor of
+        it (SPEC.md Decision 21) — see authz.RequirePageAccess.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks viewer+ role in this page's space.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /pages/{pageId}/content:
+    put:
+      operationId: updatePageContent
+      summary: >-
+        Replace a page's title/content. Requires editor+ space role, OR a
+        valid share-link guest session with edit permission scoped to this
+        page or an ancestor of it (SPEC.md Decision 21) — see
+        authz.RequirePageAccess. Rejected if the page is locked.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string }
+                content:
+                  description: ProseMirror/Tiptap JSON (SPEC.md Decision 4).
+                  type: object
+                  additionalProperties: true
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks editor+ role, or the page is locked.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Page not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /pages/{pageId}/attachments:
+    get:
+      operationId: listPageAttachments
+      summary: >-
+        A page's attachments, newest first. Requires viewer+ space role, OR a
+        share-link guest session scoped to this page or an ancestor of it.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Attachment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks access to this page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Page not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    post:
+      operationId: uploadPageAttachment
+      summary: >-
+        Upload one file to a page (SPEC.md Decision 17, 32). The stored
+        content type is sniffed from the bytes, never taken from the
+        client's Content-Type or filename. Requires editor+ space role, OR an
+        edit-permission share-link guest session scoped to this page or an
+        ancestor of it.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "201":
+          description: Stored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Attachment" }
+        "400":
+          description: Malformed multipart body, or no `file` field.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks edit access to this page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Page not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: >-
+            Rejected by the attachment policy — either "attachment exceeds
+            the configured maximum size", or `content type "<sniffed>" is not
+            on the allowlist`. Show the `error` message as-is.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: Object storage unreachable or rejected the write.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /attachments/{attachmentId}:
+    get:
+      operationId: downloadAttachment
+      summary: >-
+        Download an attachment's bytes, served with its sniffed content type
+        and `Content-Disposition: attachment`. Same access rule as
+        listPageAttachments for the attachment's page.
+      parameters:
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The file.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks access to the attachment's page.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Attachment not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: Object storage unreachable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Session token returned by POST /auth/login, sent as
+        `Authorization: Bearer <token>`. No cookie is set by the API.
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: A path parameter is not a valid UUID, or the request body is malformed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  parameters:
+    SpaceId:
+      name: spaceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PageId:
+      name: pageId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    Session:
+      type: object
+      required: [token, displayName, isOrgAdmin]
+      properties:
+        token: { type: string }
+        displayName: { type: string }
+        isOrgAdmin: { type: boolean }
+    Me:
+      type: object
+      required: [displayName, isOrgAdmin, isGuest]
+      properties:
+        displayName: { type: string }
+        isOrgAdmin: { type: boolean }
+        isGuest: { type: boolean }
+    SpaceRole:
+      type: string
+      enum: [owner, admin, editor, viewer]
+      description: >-
+        owner/admin manage members and settings; editor creates/edits/deletes
+        content; viewer is read-only (SPEC.md Decision 24).
+    Space:
+      type: object
+      required: [id, name, slug, icon, history_max_count, history_max_age_days, created_at, updated_at, my_role]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        icon: { type: string, nullable: true }
+        history_max_count: { type: integer, nullable: true }
+        history_max_age_days: { type: integer, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        my_role:
+          description: >-
+            The caller's effective role in this space. Org admins are reported
+            as owner (they pass every space-role check). For UI gating only —
+            the server enforces roles regardless.
+          allOf: [{ $ref: "#/components/schemas/SpaceRole" }]
+    PageTreeItem:
+      description: Lightweight page shape for the sidebar tree nav — omits content.
+      type: object
+      required: [id, parent_id, position, title, locked, is_template, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        parent_id: { type: string, format: uuid, nullable: true }
+        position: { type: number }
+        title: { type: string }
+        locked: { type: boolean }
+        is_template: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Page:
+      type: object
+      required:
+        [
+          id,
+          space_id,
+          parent_id,
+          position,
+          title,
+          content,
+          history_enabled,
+          locked,
+          is_template,
+          template_key,
+          created_by_user_id,
+          created_by_guest_id,
+          created_at,
+          updated_at,
+          my_role,
+          can_edit,
+        ]
+      properties:
+        id: { type: string, format: uuid }
+        space_id: { type: string, format: uuid }
+        parent_id: { type: string, format: uuid, nullable: true }
+        position: { type: number }
+        title: { type: string }
+        content:
+          description: ProseMirror/Tiptap JSON (SPEC.md Decision 4).
+          type: object
+          additionalProperties: true
+        history_enabled: { type: boolean, nullable: true }
+        locked: { type: boolean }
+        is_template: { type: boolean }
+        template_key: { type: string, nullable: true }
+        created_by_user_id: { type: string, format: uuid, nullable: true }
+        created_by_guest_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        my_role:
+          description: >-
+            The caller's effective role in this page's space (org admins
+            report owner); null for share-link guests and non-members. UI
+            gating only.
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/SpaceRole" }]
+        can_edit:
+          type: boolean
+          description: >-
+            Whether the caller may change this page's content and
+            attachments: editor+ space role, or an edit-permission share link
+            covering this page. Independent of `locked`, which blocks writes
+            for everyone — the UI should treat the page as editable only when
+            `can_edit && !locked`.
+    Attachment:
+      type: object
+      required: [id, page_id, filename, content_type, size_bytes, uploaded_by_user_id, uploaded_by_guest_id, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        page_id: { type: string, format: uuid }
+        filename: { type: string, description: Client-supplied original filename. }
+        content_type: { type: string, description: Sniffed MIME type (never the client-claimed one). }
+        size_bytes: { type: integer, format: int64 }
+        uploaded_by_user_id: { type: string, format: uuid, nullable: true }
+        uploaded_by_guest_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }

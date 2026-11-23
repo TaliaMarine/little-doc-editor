@@ -1,0 +1,160 @@
+name: Publish release
+
+# Fires on a real release tag (created by release-please, see release-please.yml)
+# so every published artifact corresponds to a real, versioned release — never
+# an arbitrary main-branch commit. workflow_dispatch exists for two reasons: (1)
+# release-please.yml chain-triggers it explicitly after creating a release,
+# since the default GITHUB_TOKEN it uses cannot itself trigger a tag-push
+# event; (2) it lets you manually (re-)publish an existing tag.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to build and publish, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write # keyless cosign signing
+  attestations: write
+
+concurrency:
+  group: docker-publish-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      major_minor: ${{ steps.version.outputs.major_minor }}
+      major: ${{ steps.version.outputs.major }}
+      image: ${{ steps.version.outputs.image }}
+    steps:
+      - name: Compute release version
+        id: version
+        env:
+          RAW_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Extract the trailing X.Y.Z regardless of any tag prefix (v1.2.3,
+          # little-doc-editor-v1.2.3, etc.) — robust to release-please's tag
+          # format, which is config-driven (release-please-config.json
+          # include-component-in-tag).
+          version=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+$' <<<"$RAW_TAG" || true)
+          if [ -z "$version" ]; then
+            echo "::error::could not extract a semver version from tag '$RAW_TAG'"
+            exit 1
+          fi
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          {
+            echo "version=$version"
+            echo "major_minor=$(cut -d. -f1,2 <<<"$version")"
+            echo "major=$(cut -d. -f1 <<<"$version")"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: Image (${{ matrix.component }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [api, frontend, collab]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Scan a local single-arch build first, so a vulnerable image is never published.
+      - name: Build image for scanning
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.component }}
+          push: false
+          load: true
+          tags: scan-candidate:local
+
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      - name: Trivy scan (fail on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: scan-candidate:local
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ matrix.component }}
+          build-args: VERSION=${{ needs.prepare.outputs.version }}
+          push: true
+          platforms: linux/amd64,linux/arm64
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+          tags: |
+            ${{ needs.prepare.outputs.image }}-${{ matrix.component }}:${{ needs.prepare.outputs.version }}
+            ${{ needs.prepare.outputs.image }}-${{ matrix.component }}:${{ needs.prepare.outputs.major_minor }}
+            ${{ needs.prepare.outputs.image }}-${{ matrix.component }}:${{ needs.prepare.outputs.major }}
+            ${{ needs.prepare.outputs.image }}-${{ matrix.component }}:latest
+
+      - name: Sign image (keyless)
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}-${{ matrix.component }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+  publish-chart:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Verify Chart.yaml version matches the release tag
+        run: |
+          set -euo pipefail
+          chart_version=$(yq -r '.version' charts/little-doc-editor/Chart.yaml)
+          if [ "$chart_version" != "${{ needs.prepare.outputs.version }}" ]; then
+            echo "::error::Chart.yaml version ($chart_version) does not match release tag (${{ needs.prepare.outputs.version }})"
+            exit 1
+          fi
+
+      - name: Package, push and sign chart
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          # helm keeps its own credentials; cosign reads the docker config, so it needs its own login.
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io --username "${{ github.actor }}" --password-stdin
+          helm package charts/little-doc-editor --destination /tmp
+          # Final chart location: oci://ghcr.io/<owner>/charts/little-doc-editor:<version>
+          dest="oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          helm push "/tmp/little-doc-editor-${{ needs.prepare.outputs.version }}.tgz" "$dest" 2>&1 | tee /tmp/push.out
+          digest=$(grep -oE 'sha256:[0-9a-f]{64}' /tmp/push.out | head -n1)
+          test -n "$digest"
+          cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/little-doc-editor@${digest}"

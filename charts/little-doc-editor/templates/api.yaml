@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-api
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  {{- if eq .Values.storage.backend "filesystem" }}
+  strategy:
+    type: Recreate   # a ReadWriteOnce volume can't be attached by old and new pods at once
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "little-doc-editor.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "little-doc-editor.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: api
+          image: "{{ .Values.imageRegistry }}{{ .Values.api.image.repository }}:{{ .Values.api.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.api.service.port }}
+          env:
+            - name: HTTP_ADDR
+              value: ":{{ .Values.api.service.port }}"
+            - name: LOG_LEVEL
+              value: {{ .Values.api.logLevel | quote }}
+            - name: INTERNAL_LOGIN_BREAK_GLASS
+              value: {{ .Values.api.internalLoginBreakGlass | quote }}
+            - name: SESSION_TTL
+              value: {{ .Values.sessionJWT.ttl | quote }}
+            - name: REDIS_ADDR
+              value: {{ .Values.redis.addr | quote }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "DATABASE_URL" "field" .Values.postgres.dsn "generatedKey" "postgres-dsn") | nindent 12 }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "SESSION_JWT_SECRET" "field" .Values.sessionJWT "generatedKey" "session-jwt-secret") | nindent 12 }}
+            {{- if .Values.bootstrapAdmin.email }}
+            - name: BOOTSTRAP_ADMIN_EMAIL
+              value: {{ .Values.bootstrapAdmin.email | quote }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "BOOTSTRAP_ADMIN_PASSWORD" "field" .Values.bootstrapAdmin.password "generatedKey" "bootstrap-admin-password") | nindent 12 }}
+            {{- end }}
+            - name: STORAGE_BACKEND
+              value: {{ .Values.storage.backend | quote }}
+            {{- if eq .Values.storage.backend "filesystem" }}
+            - name: STORAGE_DIR
+              value: {{ .Values.api.persistence.mountPath | quote }}
+            {{- else }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "S3_ACCESS_KEY" "field" .Values.s3.accessKey "generatedKey" "s3-access-key") | nindent 12 }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "S3_SECRET_KEY" "field" .Values.s3.secretKey "generatedKey" "s3-secret-key") | nindent 12 }}
+            - name: S3_ENDPOINT
+              value: {{ .Values.s3.endpoint | quote }}
+            - name: S3_BUCKET
+              value: {{ .Values.s3.bucket | quote }}
+            - name: S3_REGION
+              value: {{ .Values.s3.region | quote }}
+            - name: S3_USE_PATH_STYLE
+              value: {{ .Values.s3.usePathStyle | quote }}
+            {{- end }}
+            {{- with .Values.api.attachments.allowlist }}
+            - name: ATTACHMENT_ALLOWLIST
+              value: {{ join "," . | quote }}
+            {{- end }}
+            - name: ATTACHMENT_MAX_SIZE_BYTES
+              value: {{ .Values.api.attachments.maxSizeBytes | int64 | toString | quote }}
+            - name: OIDC_ENABLED
+              value: {{ .Values.oidc.enabled | quote }}
+            {{- if .Values.oidc.enabled }}
+            - name: OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ .Values.oidc.clientID | quote }}
+            - name: OIDC_REDIRECT_URL
+              value: {{ .Values.oidc.redirectURL | quote }}
+            {{- with .Values.oidc.postLoginURL }}
+            - name: OIDC_POST_LOGIN_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if or .Values.oidc.clientSecret.value .Values.oidc.clientSecret.existingSecret.name }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "OIDC_CLIENT_SECRET" "field" .Values.oidc.clientSecret "generatedKey" "oidc-client-secret") | nindent 12 }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.observability.otel.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.otel.endpoint | quote }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          {{- if eq .Values.storage.backend "filesystem" }}
+          volumeMounts:
+            - name: attachments
+              mountPath: {{ .Values.api.persistence.mountPath }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+      {{- if eq .Values.storage.backend "filesystem" }}
+      securityContext:
+        fsGroup: 65532   # distroless "nonroot"
+      volumes:
+        - name: attachments
+          persistentVolumeClaim:
+            claimName: {{ .Values.api.persistence.existingClaim | default (printf "%s-attachments" (include "little-doc-editor.fullname" .)) }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "little-doc-editor.fullname" . }}-api
+  labels:
+    {{- include "little-doc-editor.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "little-doc-editor.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
