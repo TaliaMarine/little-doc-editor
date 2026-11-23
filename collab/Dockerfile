@@ -6,6 +6,7 @@ COPY . .
 RUN npm run build
 
 FROM node:26-alpine
+RUN apk upgrade --no-cache
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=build /src/package.json /src/package-lock.json ./
