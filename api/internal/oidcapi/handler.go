@@ -185,24 +185,20 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var claims struct {
-		Email string `json:"email"`
-		Name  string `json:"name"`
-	}
-	if err := idToken.Claims(&claims); err != nil {
+	var raw map[string]any
+	if err := idToken.Claims(&raw); err != nil {
 		httpx.WriteError(w, http.StatusUnauthorized, "login failed: could not read claims")
 		return
 	}
-	displayName := claims.Name
-	if displayName == "" {
-		displayName = claims.Email
-	}
-	if displayName == "" {
-		displayName = idToken.Subject // collab rejects an empty display name
-	}
+	profile := h.profileFromClaims(idToken.Subject, raw)
 
-	user, err := h.jitProvision(r.Context(), idToken.Issuer, idToken.Subject, claims.Email, displayName)
+	user, err := h.jitProvision(r.Context(), idToken.Issuer, idToken.Subject, profile)
 	if err != nil {
+		if errors.Is(err, errEmailTaken) {
+			h.logger.Warn("oidc login refused: email belongs to another account", "email", profile.Email)
+			http.Redirect(w, r, h.loginErrorURL(), http.StatusFound)
+			return
+		}
 		h.logger.Error("oidc JIT provisioning failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "login failed")
 		return
@@ -253,24 +249,98 @@ func (h *Handler) postLoginURL() string {
 	return "/auth/callback"
 }
 
-func (h *Handler) jitProvision(ctx context.Context, issuer, subject, email, displayName string) (db.User, error) {
+var errEmailTaken = errors.New("email already belongs to another account")
+
+// profile is what we take from the ID token claims.
+type profile struct {
+	Email       string
+	DisplayName string
+	Username    string
+	AvatarURL   string
+	Groups      []string
+	IsAdmin     bool
+}
+
+func (h *Handler) profileFromClaims(subject string, c map[string]any) profile {
+	str := func(k string) string { s, _ := c[k].(string); return strings.TrimSpace(s) }
+	p := profile{
+		Email:     strings.ToLower(str("email")),
+		Username:  str("preferred_username"),
+		AvatarURL: str("picture"),
+	}
+	if raw, ok := c[h.cfg.OIDCGroupsClaim].([]any); ok {
+		for _, g := range raw {
+			if name, ok := g.(string); ok && name != "" {
+				p.Groups = append(p.Groups, name)
+			}
+		}
+	}
+	if p.Groups == nil {
+		p.Groups = []string{}
+	}
+	// Fallback chain: collab rejects an empty display name.
+	for _, cand := range []string{str("name"), strings.TrimSpace(str("given_name") + " " + str("family_name")), p.Username, p.Email, subject} {
+		if cand != "" {
+			p.DisplayName = cand
+			break
+		}
+	}
+	if p.Email == "" {
+		// users.email is NOT NULL UNIQUE; synthesize a stable placeholder.
+		p.Email = subject + "@oidc.invalid"
+	}
+	if g := h.cfg.OIDCAdminGroup; g != "" {
+		for _, have := range p.Groups {
+			if have == g {
+				p.IsAdmin = true
+				break
+			}
+		}
+	}
+	return p
+}
+
+// jitProvision finds or creates the OIDC-linked user and refreshes its
+// profile and org-admin flag from the claims on every login — the IdP is
+// the source of truth, so leaving the admin group also demotes.
+func (h *Handler) jitProvision(ctx context.Context, issuer, subject string, p profile) (db.User, error) {
 	user, err := h.queries.GetUserByOIDCIdentity(ctx, db.GetUserByOIDCIdentityParams{
 		OidcIssuer:  &issuer,
 		OidcSubject: &subject,
 	})
-	if err == nil {
-		return user, nil
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Never silently link to (or take over) an existing account that
+		// happens to share the email, e.g. the bootstrap admin.
+		if _, lookupErr := h.queries.GetUserByEmailAnyProvider(ctx, p.Email); lookupErr == nil {
+			return db.User{}, errEmailTaken
+		} else if !errors.Is(lookupErr, pgx.ErrNoRows) {
+			return db.User{}, lookupErr
+		}
+		user, err = h.queries.CreateOIDCUser(ctx, db.CreateOIDCUserParams{
+			Email:       p.Email,
+			DisplayName: p.DisplayName,
+			OidcIssuer:  &issuer,
+			OidcSubject: &subject,
+		})
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil {
 		return db.User{}, err
 	}
-
-	return h.queries.CreateOIDCUser(ctx, db.CreateOIDCUserParams{
-		Email:       email,
-		DisplayName: displayName,
-		OidcIssuer:  &issuer,
-		OidcSubject: &subject,
+	return h.queries.UpdateOIDCUserProfile(ctx, db.UpdateOIDCUserProfileParams{
+		ID:          user.ID,
+		DisplayName: p.DisplayName,
+		Username:    nilIfEmpty(p.Username),
+		AvatarUrl:   nilIfEmpty(p.AvatarURL),
+		IdpGroups:   p.Groups,
+		IsOrgAdmin:  p.IsAdmin,
 	})
+}
+
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // secureCookies reports whether to set the Secure cookie attribute. r.TLS

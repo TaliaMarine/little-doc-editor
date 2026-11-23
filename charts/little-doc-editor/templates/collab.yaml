@@ -32,6 +32,10 @@ spec:
           env:
             - name: PORT
               value: {{ .Values.collab.service.port | quote }}
+            {{- with .Values.defaultMemberRole }}
+            - name: DEFAULT_MEMBER_ROLE
+              value: {{ . | quote }}
+            {{- end }}
             - name: REDIS_ADDR
               value: {{ .Values.redis.addr | quote }}
             {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "DATABASE_URL" "field" .Values.postgres.dsn "generatedKey" "postgres-dsn") | nindent 12 }}

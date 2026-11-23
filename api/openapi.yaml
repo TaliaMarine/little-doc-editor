@@ -450,6 +450,12 @@ components:
         displayName: { type: string }
         isOrgAdmin: { type: boolean }
         isGuest: { type: boolean }
+        email: { type: string }
+        authProvider: { type: string, enum: [internal, oidc] }
+        username: { type: string, nullable: true }
+        avatarUrl: { type: string, nullable: true }
+        groups: { type: array, items: { type: string } }
+        lastLoginAt: { type: string, format: date-time }
     SpaceRole:
       type: string
       enum: [owner, admin, editor, viewer]

@@ -46,6 +46,7 @@ type Querier interface {
 	GetSpaceBySlug(ctx context.Context, slug string) (Space, error)
 	GetSpaceMemberRole(ctx context.Context, arg GetSpaceMemberRoleParams) (SpaceRole, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
+	GetUserByEmailAnyProvider(ctx context.Context, lower string) (User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	GetUserByOIDCIdentity(ctx context.Context, arg GetUserByOIDCIdentityParams) (User, error)
 	// Org admins can see every space regardless of membership (SPEC.md §6.5) —
@@ -94,6 +95,10 @@ type Querier interface {
 	SearchPages(ctx context.Context, arg SearchPagesParams) ([]SearchPagesRow, error)
 	SetInternalLoginDisabled(ctx context.Context, internalLoginDisabled bool) (InstanceSetting, error)
 	SetUserDisabled(ctx context.Context, arg SetUserDisabledParams) error
+	TouchUserLogin(ctx context.Context, id pgtype.UUID) error
+	// Applied on every OIDC login: the IdP is the source of truth for the display
+	// name, profile fields, group membership and (via the admin group) org admin.
+	UpdateOIDCUserProfile(ctx context.Context, arg UpdateOIDCUserProfileParams) (User, error)
 	UpdatePageContent(ctx context.Context, arg UpdatePageContentParams) (Page, error)
 	// Backs page-tree drag-and-drop reordering/reparenting (SPEC.md §5). A
 	// caller-supplied fractional position between the two flanking siblings —

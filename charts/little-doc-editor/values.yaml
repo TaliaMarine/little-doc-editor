@@ -76,6 +76,16 @@ oidc:
   # Where the browser lands after login (defaults to /auth/callback on the
   # redirectURL's origin).
   postLoginURL: ""
+  # Members of this IdP group become org admins (re-evaluated at every login;
+  # leaving the group demotes). Empty disables the mapping.
+  adminGroup: ""
+  # ID-token claim that lists the user's groups.
+  groupsClaim: groups
+
+# Implicit space role of EVERY signed-in user in every space: "" (none),
+# "viewer" or "editor". Explicit space memberships still apply when higher.
+# Applied by both api and collab.
+defaultMemberRole: ""
 
 # --- Session signing (shared between api and collab, SPEC.md §4) ---
 # api issues session tokens (login, share-link redemption); collab validates

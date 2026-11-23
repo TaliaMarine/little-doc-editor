@@ -18,6 +18,12 @@ export type Me = {
     displayName: string;
     isOrgAdmin: boolean;
     isGuest: boolean;
+    email?: string;
+    authProvider?: 'internal' | 'oidc';
+    username?: string | null;
+    avatarUrl?: string | null;
+    groups?: Array<string>;
+    lastLoginAt?: string;
 };
 
 /**

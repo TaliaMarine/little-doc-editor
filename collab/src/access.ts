@@ -17,6 +17,24 @@ export interface DocumentAccess {
   readOnly: boolean
 }
 
+// Implicit space role of every signed-in user (DEFAULT_MEMBER_ROLE, same
+// setting as api's): '', 'viewer' or 'editor'. An explicit membership wins
+// when it is higher.
+const DEFAULT_MEMBER_ROLE = process.env.DEFAULT_MEMBER_ROLE === 'viewer' || process.env.DEFAULT_MEMBER_ROLE === 'editor'
+  ? process.env.DEFAULT_MEMBER_ROLE
+  : null
+const ROLE_RANK = { viewer: 0, editor: 1, admin: 2, owner: 3 } as const
+
+function effectiveRole (explicit: keyof typeof ROLE_RANK | null): keyof typeof ROLE_RANK | null {
+  if (!DEFAULT_MEMBER_ROLE) {
+    return explicit
+  }
+  if (explicit && ROLE_RANK[explicit] >= ROLE_RANK[DEFAULT_MEMBER_ROLE]) {
+    return explicit
+  }
+  return DEFAULT_MEMBER_ROLE
+}
+
 export class AccessDeniedError extends Error {}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -69,10 +87,11 @@ async function authorizeUser (userId: string, pageId: string): Promise<DocumentA
   if (row.is_org_admin) {
     return { readOnly: row.locked }
   }
-  if (row.role === null) {
+  const role = effectiveRole(row.role)
+  if (role === null) {
     throw new AccessDeniedError('no role in this page\'s space')
   }
-  return { readOnly: row.locked || row.role === 'viewer' }
+  return { readOnly: row.locked || role === 'viewer' }
 }
 
 async function authorizeShareGuest (guestIdentityId: string, shareLinkId: string, pageId: string): Promise<DocumentAccess> {

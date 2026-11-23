@@ -14,7 +14,7 @@ import (
 const createInternalOrgAdmin = `-- name: CreateInternalOrgAdmin :one
 INSERT INTO users (email, display_name, auth_provider, password_hash, is_org_admin)
 VALUES ($1, $2, 'internal', $3, true)
-RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at
+RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at
 `
 
 type CreateInternalOrgAdminParams struct {
@@ -41,6 +41,10 @@ func (q *Queries) CreateInternalOrgAdmin(ctx context.Context, arg CreateInternal
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
 	)
 	return i, err
 }
@@ -48,7 +52,7 @@ func (q *Queries) CreateInternalOrgAdmin(ctx context.Context, arg CreateInternal
 const createInternalUser = `-- name: CreateInternalUser :one
 INSERT INTO users (email, display_name, auth_provider, password_hash)
 VALUES ($1, $2, 'internal', $3)
-RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at
+RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at
 `
 
 type CreateInternalUserParams struct {
@@ -72,6 +76,10 @@ func (q *Queries) CreateInternalUser(ctx context.Context, arg CreateInternalUser
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
 	)
 	return i, err
 }
@@ -79,7 +87,7 @@ func (q *Queries) CreateInternalUser(ctx context.Context, arg CreateInternalUser
 const createOIDCUser = `-- name: CreateOIDCUser :one
 INSERT INTO users (email, display_name, auth_provider, oidc_issuer, oidc_subject)
 VALUES ($1, $2, 'oidc', $3, $4)
-RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at
+RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at
 `
 
 type CreateOIDCUserParams struct {
@@ -109,12 +117,16 @@ func (q *Queries) CreateOIDCUser(ctx context.Context, arg CreateOIDCUserParams) 
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at FROM users WHERE email = $1
+SELECT id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -132,12 +144,43 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
+	)
+	return i, err
+}
+
+const getUserByEmailAnyProvider = `-- name: GetUserByEmailAnyProvider :one
+SELECT id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at FROM users WHERE lower(email) = lower($1)
+`
+
+func (q *Queries) GetUserByEmailAnyProvider(ctx context.Context, lower string) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByEmailAnyProvider, lower)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.AuthProvider,
+		&i.PasswordHash,
+		&i.OidcIssuer,
+		&i.OidcSubject,
+		&i.IsOrgAdmin,
+		&i.Disabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at FROM users WHERE id = $1
+SELECT id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error) {
@@ -155,12 +198,16 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
 	)
 	return i, err
 }
 
 const getUserByOIDCIdentity = `-- name: GetUserByOIDCIdentity :one
-SELECT id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2
+SELECT id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2
 `
 
 type GetUserByOIDCIdentityParams struct {
@@ -183,6 +230,10 @@ func (q *Queries) GetUserByOIDCIdentity(ctx context.Context, arg GetUserByOIDCId
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
 	)
 	return i, err
 }
@@ -201,11 +252,74 @@ func (q *Queries) SetUserDisabled(ctx context.Context, arg SetUserDisabledParams
 	return err
 }
 
+const touchUserLogin = `-- name: TouchUserLogin :exec
+UPDATE users SET last_login_at = now() WHERE id = $1
+`
+
+func (q *Queries) TouchUserLogin(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, touchUserLogin, id)
+	return err
+}
+
+const updateOIDCUserProfile = `-- name: UpdateOIDCUserProfile :one
+UPDATE users
+SET display_name  = $2,
+    username      = $3,
+    avatar_url    = $4,
+    idp_groups    = $5,
+    is_org_admin  = $6,
+    last_login_at = now(),
+    updated_at    = now()
+WHERE id = $1
+RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at
+`
+
+type UpdateOIDCUserProfileParams struct {
+	ID          pgtype.UUID `json:"id"`
+	DisplayName string      `json:"display_name"`
+	Username    *string     `json:"username"`
+	AvatarUrl   *string     `json:"avatar_url"`
+	IdpGroups   []string    `json:"idp_groups"`
+	IsOrgAdmin  bool        `json:"is_org_admin"`
+}
+
+// Applied on every OIDC login: the IdP is the source of truth for the display
+// name, profile fields, group membership and (via the admin group) org admin.
+func (q *Queries) UpdateOIDCUserProfile(ctx context.Context, arg UpdateOIDCUserProfileParams) (User, error) {
+	row := q.db.QueryRow(ctx, updateOIDCUserProfile,
+		arg.ID,
+		arg.DisplayName,
+		arg.Username,
+		arg.AvatarUrl,
+		arg.IdpGroups,
+		arg.IsOrgAdmin,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.AuthProvider,
+		&i.PasswordHash,
+		&i.OidcIssuer,
+		&i.OidcSubject,
+		&i.IsOrgAdmin,
+		&i.Disabled,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
+	)
+	return i, err
+}
+
 const upsertDevAdminUser = `-- name: UpsertDevAdminUser :one
 INSERT INTO users (id, email, display_name, auth_provider, password_hash, is_org_admin)
 VALUES ($1, $2, $3, 'internal', $4, true)
 ON CONFLICT (id) DO UPDATE SET display_name = $3, password_hash = $4, is_org_admin = true, disabled = false
-RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at
+RETURNING id, email, display_name, auth_provider, password_hash, oidc_issuer, oidc_subject, is_org_admin, disabled, created_at, updated_at, username, avatar_url, idp_groups, last_login_at
 `
 
 type UpsertDevAdminUserParams struct {
@@ -242,6 +356,10 @@ func (q *Queries) UpsertDevAdminUser(ctx context.Context, arg UpsertDevAdminUser
 		&i.Disabled,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Username,
+		&i.AvatarUrl,
+		&i.IdpGroups,
+		&i.LastLoginAt,
 	)
 	return i, err
 }

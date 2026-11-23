@@ -16,6 +16,15 @@ const messages = {
       loadFailed: 'Failed to load pages',
       logout: 'Log out',
     },
+    profile: {
+      admin: 'Administrator',
+      editor: 'Editor',
+      sso: 'Single sign-on',
+      internal: 'Local account',
+      username: 'Username',
+      groups: 'Groups',
+      lastLogin: 'Last sign-in',
+    },
     home: {
       welcome: 'Welcome to little-doc-editor',
       subtitle: 'Select a space from the sidebar, or create one to get started.',

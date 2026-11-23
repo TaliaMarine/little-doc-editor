@@ -25,6 +25,41 @@ const (
 	RoleOwner
 )
 
+// defaultMemberRole is the implicit space role of every signed-in user
+// (config DEFAULT_MEMBER_ROLE); nil means none. Set once at startup.
+var defaultMemberRole *db.SpaceRole
+
+// SetDefaultMemberRole configures the implicit role ("", "viewer", "editor").
+func SetDefaultMemberRole(role string) {
+	switch db.SpaceRole(role) {
+	case db.SpaceRoleViewer, db.SpaceRoleEditor:
+		r := db.SpaceRole(role)
+		defaultMemberRole = &r
+	default:
+		defaultMemberRole = nil
+	}
+}
+
+// DefaultMemberRole returns the configured implicit role, or nil.
+func DefaultMemberRole() *db.SpaceRole { return defaultMemberRole }
+
+// WithDefaultRole raises an explicit membership role (nil = non-member) to
+// at least the instance default.
+func WithDefaultRole(explicit *db.SpaceRole) *db.SpaceRole {
+	if defaultMemberRole == nil {
+		return explicit
+	}
+	if explicit == nil {
+		return defaultMemberRole
+	}
+	e, eok := parseRole(*explicit)
+	d, _ := parseRole(*defaultMemberRole)
+	if eok && e >= d {
+		return explicit
+	}
+	return defaultMemberRole
+}
+
 func parseRole(s db.SpaceRole) (Role, bool) {
 	switch s {
 	case db.SpaceRoleViewer:
@@ -61,18 +96,11 @@ func HasSpaceRole(ctx context.Context, queries *db.Queries, identity authctx.Ide
 		return false, nil
 	}
 
-	dbRole, err := queries.GetSpaceMemberRole(ctx, db.GetSpaceMemberRoleParams{
-		SpaceID: db.ToPgUUID(spaceID),
-		UserID:  db.ToPgUUID(*identity.UserID),
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
+	eff, err := EffectiveSpaceRole(ctx, queries, identity, spaceID)
+	if err != nil || eff == nil {
 		return false, err
 	}
-
-	role, ok := parseRole(dbRole)
+	role, ok := parseRole(*eff)
 	if !ok {
 		return false, nil
 	}
@@ -99,11 +127,11 @@ func EffectiveSpaceRole(ctx context.Context, queries *db.Queries, identity authc
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
+			return WithDefaultRole(nil), nil
 		}
 		return nil, err
 	}
-	return &role, nil
+	return WithDefaultRole(&role), nil
 }
 
 // RequireSpaceRole is HasSpaceRole plus writing the appropriate HTTP error

@@ -5,8 +5,55 @@
       <v-spacer />
 
       <template v-if="authStore.isAuthenticated">
-        <span class="mr-4">{{ authStore.displayName }}</span>
-        <v-btn variant="text" @click="logout">{{ t('nav.logout') }}</v-btn>
+        <v-menu :close-on-content-click="false" location="bottom end">
+          <template #activator="{ props: menuProps }">
+            <v-btn v-bind="menuProps" class="mr-2" variant="text">
+              <v-avatar class="mr-2" color="primary" size="28">
+                <v-img v-if="authStore.profile?.avatarUrl" :alt="authStore.displayName ?? ''" :src="authStore.profile.avatarUrl" />
+                <span v-else class="text-caption">{{ initials }}</span>
+              </v-avatar>
+              {{ authStore.displayName }}
+            </v-btn>
+          </template>
+
+          <v-card min-width="300">
+            <v-card-title>{{ authStore.displayName }}</v-card-title>
+            <v-card-subtitle v-if="authStore.profile?.email">{{ authStore.profile.email }}</v-card-subtitle>
+
+            <v-card-text>
+              <v-chip v-if="authStore.isOrgAdmin" class="mr-1 mb-1" color="primary" size="small">{{ t('profile.admin') }}</v-chip>
+              <v-chip v-else class="mr-1 mb-1" size="small">{{ t('profile.editor') }}</v-chip>
+
+              <v-chip v-if="authStore.profile?.authProvider" class="mb-1" size="small" variant="outlined">
+                {{ authStore.profile.authProvider === 'oidc' ? t('profile.sso') : t('profile.internal') }}
+              </v-chip>
+
+              <div v-if="authStore.profile?.username" class="mt-2 text-body-2">
+                {{ t('profile.username') }}: {{ authStore.profile.username }}
+              </div>
+
+              <div v-if="authStore.profile?.groups?.length" class="mt-2">
+                <div class="text-caption">{{ t('profile.groups') }}</div>
+
+                <v-chip
+                  v-for="group in authStore.profile.groups"
+                  :key="group"
+                  class="mr-1 mt-1"
+                  label
+                  size="x-small"
+                >{{ group }}</v-chip>
+              </div>
+
+              <div v-if="authStore.profile?.lastLoginAt" class="mt-2 text-caption">
+                {{ t('profile.lastLogin') }}: {{ new Date(authStore.profile.lastLoginAt).toLocaleString() }}
+              </div>
+            </v-card-text>
+
+            <v-card-actions>
+              <v-btn block variant="tonal" @click="logout">{{ t('nav.logout') }}</v-btn>
+            </v-card-actions>
+          </v-card>
+        </v-menu>
       </template>
     </v-app-bar>
 
@@ -75,6 +122,13 @@
     },
     { immediate: true },
   )
+
+  const initials = computed(() => (authStore.displayName ?? '?')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(part => part[0]!.toUpperCase())
+    .join(''))
 
   function logout () {
     authStore.logout()

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { setAuthToken, setUnauthorizedHandler } from '@/api/client'
-import { login as apiLogin, getMe } from '@/api/generated'
+import { login as apiLogin, getMe, type Me } from '@/api/generated'
 
 const STORAGE_KEY = 'little-doc-editor.session'
 
@@ -27,6 +27,7 @@ export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(null)
   const displayName = ref<string | null>(null)
   const isOrgAdmin = ref(false)
+  const profile = ref<Me | null>(null)
 
   const isAuthenticated = computed(() => token.value !== null)
 
@@ -51,6 +52,7 @@ export const useAuthStore = defineStore('auth', () => {
     token.value = null
     displayName.value = null
     isOrgAdmin.value = false
+    profile.value = null
     setAuthToken(null)
     persist()
   }
@@ -78,6 +80,17 @@ export const useAuthStore = defineStore('auth', () => {
       throw new Error(error.error ?? 'Login failed')
     }
     applySession(data!)
+    refreshProfile().catch(() => {})
+  }
+
+  // Loads the signed-in user's profile (email, username, avatar, IdP groups…).
+  async function refreshProfile () {
+    const { data } = await getMe()
+    if (data) {
+      profile.value = data
+      isOrgAdmin.value = data.isOrgAdmin
+      displayName.value = data.displayName
+    }
   }
 
   // Completes an OIDC login: the api redirected back with the session token
@@ -90,12 +103,16 @@ export const useAuthStore = defineStore('auth', () => {
       throw new Error('Login failed')
     }
     applySession({ token: sessionToken, displayName: data.displayName, isOrgAdmin: data.isOrgAdmin })
+    profile.value = data
   }
 
   // The api client has no store dependency of its own (see api/client.ts) —
   // it calls back into this store on a 401 instead of importing it.
   setUnauthorizedHandler(logout)
   restore()
+  if (token.value) {
+    refreshProfile().catch(() => {})
+  }
 
-  return { token, displayName, isOrgAdmin, isAuthenticated, login, loginWithToken, logout }
+  return { token, displayName, isOrgAdmin, isAuthenticated, profile, login, loginWithToken, logout, refreshProfile }
 })

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/TaliaMarine/little-doc-editor/api/internal/authz"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/config"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/db"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/oidcapi"
@@ -78,6 +79,8 @@ func run() error {
 			return err
 		}
 	}
+
+	authz.SetDefaultMemberRole(cfg.DefaultMemberRole)
 
 	store, err := storage.Open(ctx, cfg)
 	if err != nil {

@@ -291,4 +291,8 @@ type User struct {
 	Disabled     bool               `json:"disabled"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	Username     *string            `json:"username"`
+	AvatarUrl    *string            `json:"avatar_url"`
+	IdpGroups    []string           `json:"idp_groups"`
+	LastLoginAt  pgtype.Timestamptz `json:"last_login_at"`
 }

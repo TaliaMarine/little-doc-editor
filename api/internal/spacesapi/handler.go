@@ -350,6 +350,36 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, []spaceResponse{})
 		return
 	}
+	if authz.DefaultMemberRole() != nil {
+		// Everyone signed in implicitly has the default role everywhere, so
+		// list every space with max(explicit membership, default).
+		all, err := h.queries.ListAllSpaces(r.Context())
+		if err != nil {
+			h.logger.Error("list spaces failed", "error", err)
+			httpx.WriteError(w, http.StatusInternalServerError, "failed to list spaces")
+			return
+		}
+		explicit := map[pgtype.UUID]db.SpaceRole{}
+		mine, err := h.queries.ListSpacesForUser(r.Context(), db.ToPgUUID(*identity.UserID))
+		if err != nil {
+			h.logger.Error("list spaces failed", "error", err)
+			httpx.WriteError(w, http.StatusInternalServerError, "failed to list spaces")
+			return
+		}
+		for _, m := range mine {
+			explicit[m.ID] = m.Role
+		}
+		out := make([]spaceResponse, len(all))
+		for i, sp := range all {
+			var ex *db.SpaceRole
+			if role, ok := explicit[sp.ID]; ok {
+				ex = &role
+			}
+			out[i] = toSpaceResponse(sp, *authz.WithDefaultRole(ex))
+		}
+		httpx.WriteJSON(w, http.StatusOK, out)
+		return
+	}
 	rows, err := h.queries.ListSpacesForUser(r.Context(), db.ToPgUUID(*identity.UserID))
 	if err != nil {
 		h.logger.Error("list spaces failed", "error", err)

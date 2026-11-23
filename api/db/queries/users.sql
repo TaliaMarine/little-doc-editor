@@ -40,3 +40,23 @@ INSERT INTO users (id, email, display_name, auth_provider, password_hash, is_org
 VALUES ($1, $2, $3, 'internal', $4, true)
 ON CONFLICT (id) DO UPDATE SET display_name = $3, password_hash = $4, is_org_admin = true, disabled = false
 RETURNING *;
+
+-- name: GetUserByEmailAnyProvider :one
+SELECT * FROM users WHERE lower(email) = lower($1);
+
+-- name: UpdateOIDCUserProfile :one
+-- Applied on every OIDC login: the IdP is the source of truth for the display
+-- name, profile fields, group membership and (via the admin group) org admin.
+UPDATE users
+SET display_name  = $2,
+    username      = $3,
+    avatar_url    = $4,
+    idp_groups    = $5,
+    is_org_admin  = $6,
+    last_login_at = now(),
+    updated_at    = now()
+WHERE id = $1
+RETURNING *;
+
+-- name: TouchUserLogin :exec
+UPDATE users SET last_login_at = now() WHERE id = $1;

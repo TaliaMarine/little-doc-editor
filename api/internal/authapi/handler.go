@@ -151,9 +151,22 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 	identity := authctx.FromContext(r.Context())
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"displayName": identity.DisplayName,
 		"isOrgAdmin":  identity.IsOrgAdmin,
 		"isGuest":     identity.IsGuest(),
-	})
+	}
+	if identity.UserID != nil {
+		if user, err := h.queries.GetUserByID(r.Context(), db.ToPgUUID(*identity.UserID)); err == nil {
+			out["email"] = user.Email
+			out["authProvider"] = user.AuthProvider
+			out["username"] = user.Username
+			out["avatarUrl"] = user.AvatarUrl
+			out["groups"] = user.IdpGroups
+			if user.LastLoginAt.Valid {
+				out["lastLoginAt"] = user.LastLoginAt.Time
+			}
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
 }

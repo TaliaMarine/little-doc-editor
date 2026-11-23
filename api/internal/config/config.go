@@ -72,6 +72,15 @@ type Config struct {
 	// login; the session token is appended as a URL fragment. Defaults to
 	// /auth/callback on the origin of OIDCRedirectURL.
 	OIDCPostLoginURL string `yaml:"oidcPostLoginURL"`
+	// OIDCAdminGroup, when set, makes members of that IdP group org admins
+	// (re-evaluated on every login, so removal from the group demotes).
+	OIDCAdminGroup string `yaml:"oidcAdminGroup"`
+	// OIDCGroupsClaim is the ID-token claim holding the user's group names.
+	OIDCGroupsClaim string `yaml:"oidcGroupsClaim"`
+	// DefaultMemberRole is the space role every signed-in (non-guest) user
+	// implicitly has in every space: "", "viewer" or "editor". An explicit
+	// space membership still applies when it is higher.
+	DefaultMemberRole string `yaml:"defaultMemberRole"`
 	// S3-compatible object storage for attachments (Decision 5).
 	S3Endpoint     string `yaml:"s3Endpoint"`
 	S3Bucket       string `yaml:"s3Bucket"`
@@ -98,6 +107,7 @@ func Defaults() Config {
 		SessionTTL:             24 * time.Hour,
 		S3Region:               "us-east-1",
 		S3UsePathStyle:         true,
+		OIDCGroupsClaim:        "groups",
 		AttachmentMaxSizeBytes: 25 * 1024 * 1024, // 25MB
 		AttachmentAllowlist: []string{
 			"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
@@ -186,6 +196,15 @@ func Load() (Config, error) {
 	if v := os.Getenv("OIDC_REDIRECT_URL"); v != "" {
 		cfg.OIDCRedirectURL = v
 	}
+	if v := os.Getenv("OIDC_ADMIN_GROUP"); v != "" {
+		cfg.OIDCAdminGroup = v
+	}
+	if v := os.Getenv("OIDC_GROUPS_CLAIM"); v != "" {
+		cfg.OIDCGroupsClaim = v
+	}
+	if v := os.Getenv("DEFAULT_MEMBER_ROLE"); v != "" {
+		cfg.DefaultMemberRole = v
+	}
 	if v := os.Getenv("STORAGE_BACKEND"); v != "" {
 		cfg.StorageBackend = v
 	}
@@ -258,6 +277,11 @@ func (c Config) validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("LOG_LEVEL must be one of debug|info|warn|error, got %q", c.LogLevel)
+	}
+	switch c.DefaultMemberRole {
+	case "", "viewer", "editor":
+	default:
+		return fmt.Errorf("DEFAULT_MEMBER_ROLE must be empty, viewer or editor, got %q", c.DefaultMemberRole)
 	}
 	switch c.StorageBackend {
 	case "", "s3":
