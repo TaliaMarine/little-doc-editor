@@ -49,3 +49,21 @@ func TestProfileFromClaims_AdminGroupUnsetNeverAdmin(t *testing.T) {
 		t.Fatal("no admin group configured: nobody is promoted")
 	}
 }
+
+func TestProfileFromClaims_UnverifiedEmailIsNotTrusted(t *testing.T) {
+	h := newTestHandler()
+	for _, v := range []any{false, "false"} {
+		p := h.profileFromClaims("sub9", map[string]any{"email": "victim@example.com", "email_verified": v})
+		if p.Email != "sub9@oidc.invalid" {
+			t.Fatalf("unverified email must not be stored, got %q", p.Email)
+		}
+	}
+	p := h.profileFromClaims("sub9", map[string]any{"email": "ok@example.com", "email_verified": true})
+	if p.Email != "ok@example.com" {
+		t.Fatalf("verified email kept, got %q", p.Email)
+	}
+	p = h.profileFromClaims("sub9", map[string]any{"email": "ok@example.com"})
+	if p.Email != "ok@example.com" {
+		t.Fatalf("absent claim is trusted, got %q", p.Email)
+	}
+}

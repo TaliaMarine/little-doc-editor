@@ -107,6 +107,139 @@ export type Attachment = {
     created_at: string;
 };
 
+export type Invite = {
+    id: string;
+    email: string | null;
+    grants_org_admin: boolean;
+    status: 'pending' | 'redeemed' | 'revoked' | 'expired';
+    expires_at: string | null;
+    redeemed_at: string | null;
+    redeemed_by_user_id: string | null;
+    revoked_at: string | null;
+    created_by_user_id: string;
+    created_by_display_name: string | null;
+    created_at: string;
+};
+
+export type InviteCreated = Invite & {
+    /**
+     * Bearer secret
+     */
+    token: string;
+};
+
+export type User = {
+    id: string;
+    email: string;
+    display_name: string;
+    auth_provider: 'internal' | 'oidc';
+    is_org_admin: boolean;
+    disabled: boolean;
+    created_at: string;
+    last_login_at: string | null;
+};
+
+export type SpaceMemberRow = {
+    id: string;
+    space_id: string;
+    user_id: string | null;
+    group_id: string | null;
+    role: SpaceRole;
+    created_at: string;
+};
+
+/**
+ * A member row with display fields. Exactly one of user_id / group_id is set.
+ */
+export type SpaceMember = SpaceMemberRow & {
+    user_email: string | null;
+    user_display_name: string | null;
+    group_name: string | null;
+};
+
+export type MemberCandidate = {
+    id: string;
+    email: string;
+    display_name: string;
+};
+
+export type GroupCandidate = {
+    id: string;
+    name: string;
+};
+
+export type PageTemplate = {
+    key: string;
+    name: string;
+    description: string;
+    default_title: string;
+    /**
+     * ProseMirror/Tiptap JSON (StarterKit nodes only).
+     */
+    content: {
+        [key: string]: unknown;
+    };
+};
+
+export type PageRevision = {
+    id: string;
+    page_id: string;
+    title: string | null;
+    author_user_id: string | null;
+    author_guest_id: string | null;
+    author_user_display_name: string | null;
+    author_guest_display_name: string | null;
+    created_at: string;
+};
+
+export type PageRevisionDetail = PageRevision & {
+    content: {
+        [key: string]: unknown;
+    };
+};
+
+export type ShareLink = {
+    id: string;
+    page_id: string;
+    token: string;
+    permission: 'view' | 'edit';
+    requires_password: boolean;
+    expires_at: string | null;
+    revoked_at: string | null;
+    created_by_user_id: string;
+    created_at: string;
+};
+
+export type ShareLinkAccessLogEntry = {
+    id: string;
+    share_link_id: string;
+    accessed_at: string;
+    ip_hash: string;
+    user_agent: string | null;
+    viewer_user_id: string | null;
+    viewer_guest_id: string | null;
+    viewer_user_display_name: string | null;
+    viewer_guest_display_name: string | null;
+};
+
+export type AdminSettings = {
+    internal_login_disabled: boolean;
+    updated_at: string;
+    /**
+     * The policy in force (admin override
+     */
+    attachment_allowlist: Array<string>;
+    attachment_max_size_bytes: number;
+    attachment_policy_overridden: boolean;
+    /**
+     * Deployment default (env / Helm).
+     */
+    attachment_default_allowlist: Array<string>;
+    attachment_default_max_size_bytes: number;
+};
+
+export type ExportFormat = 'md' | 'html' | 'pdf';
+
 export type SpaceId = string;
 
 export type PageId = string;
@@ -123,6 +256,10 @@ export type LoginData = {
 
 export type LoginErrors = {
     /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
      * Wrong email/password.
      */
     401: Error;
@@ -130,6 +267,10 @@ export type LoginErrors = {
      * Account disabled, or internal login disabled instance-wide.
      */
     403: Error;
+    /**
+     * Rate limited. `Retry-After` says how many seconds to wait.
+     */
+    429: Error;
 };
 
 export type LoginError = LoginErrors[keyof LoginErrors];
@@ -224,6 +365,10 @@ export type CreateSpaceData = {
 
 export type CreateSpaceErrors = {
     /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
      * Missing or invalid bearer token.
      */
     401: Error;
@@ -247,6 +392,45 @@ export type CreateSpaceResponses = {
 };
 
 export type CreateSpaceResponse = CreateSpaceResponses[keyof CreateSpaceResponses];
+
+export type DeleteSpaceData = {
+    body?: never;
+    path: {
+        spaceId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}';
+};
+
+export type DeleteSpaceErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type DeleteSpaceError = DeleteSpaceErrors[keyof DeleteSpaceErrors];
+
+export type DeleteSpaceResponses = {
+    /**
+     * Deleted.
+     */
+    204: void;
+};
+
+export type DeleteSpaceResponse = DeleteSpaceResponses[keyof DeleteSpaceResponses];
 
 export type GetSpaceData = {
     body?: never;
@@ -287,6 +471,56 @@ export type GetSpaceResponses = {
 
 export type GetSpaceResponse = GetSpaceResponses[keyof GetSpaceResponses];
 
+export type UpdateSpaceData = {
+    body: {
+        name?: string;
+        icon?: string | null;
+        /**
+         * Max revisions kept per page.
+         */
+        historyMaxCount?: number | null;
+        /**
+         * Max revision age in days.
+         */
+        historyMaxAgeDays?: number | null;
+    };
+    path: {
+        spaceId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}';
+};
+
+export type UpdateSpaceErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type UpdateSpaceError = UpdateSpaceErrors[keyof UpdateSpaceErrors];
+
+export type UpdateSpaceResponses = {
+    /**
+     * Updated.
+     */
+    200: Space;
+};
+
+export type UpdateSpaceResponse = UpdateSpaceResponses[keyof UpdateSpaceResponses];
+
 export type ListPagesBySpaceData = {
     body?: never;
     path: {
@@ -309,6 +543,10 @@ export type ListPagesBySpaceErrors = {
      * Caller lacks viewer+ role in this space.
      */
     403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
 };
 
 export type ListPagesBySpaceError = ListPagesBySpaceErrors[keyof ListPagesBySpaceErrors];
@@ -325,13 +563,20 @@ export type ListPagesBySpaceResponse = ListPagesBySpaceResponses[keyof ListPages
 export type CreatePageData = {
     body: {
         parentId?: string | null;
-        title: string;
         /**
-         * ProseMirror/Tiptap JSON (SPEC.md Decision 4).
+         * Required unless `templateKey` is given (then defaults to the template's default title).
+         */
+        title?: string;
+        /**
+         * ProseMirror/Tiptap JSON (SPEC.md Decision 4). Mutually exclusive with `templateKey`.
          */
         content?: {
             [key: string]: unknown;
         };
+        /**
+         * Create the page from a built-in template (see listPageTemplates). Unknown key -> 400.
+         */
+        templateKey?: string;
     };
     path: {
         spaceId: string;
@@ -369,6 +614,45 @@ export type CreatePageResponses = {
 };
 
 export type CreatePageResponse = CreatePageResponses[keyof CreatePageResponses];
+
+export type DeletePageData = {
+    body?: never;
+    path: {
+        pageId: string;
+    };
+    query?: never;
+    url: '/pages/{pageId}';
+};
+
+export type DeletePageErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type DeletePageError = DeletePageErrors[keyof DeletePageErrors];
+
+export type DeletePageResponses = {
+    /**
+     * Deleted.
+     */
+    204: void;
+};
+
+export type DeletePageResponse = DeletePageResponses[keyof DeletePageResponses];
 
 export type GetPageData = {
     body?: never;
@@ -411,9 +695,9 @@ export type GetPageResponse = GetPageResponses[keyof GetPageResponses];
 
 export type UpdatePageContentData = {
     body: {
-        title: string;
+        title?: string;
         /**
-         * ProseMirror/Tiptap JSON (SPEC.md Decision 4).
+         * ProseMirror/Tiptap JSON (SPEC.md Decision 4). Omit for a title-only rename.
          */
         content?: {
             [key: string]: unknown;
@@ -586,3 +870,1379 @@ export type DownloadAttachmentResponses = {
 };
 
 export type DownloadAttachmentResponse = DownloadAttachmentResponses[keyof DownloadAttachmentResponses];
+
+export type LogoutData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/auth/logout';
+};
+
+export type LogoutErrors = {
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+};
+
+export type LogoutError = LogoutErrors[keyof LogoutErrors];
+
+export type LogoutResponses = {
+    /**
+     * Session revoked.
+     */
+    204: void;
+};
+
+export type LogoutResponse = LogoutResponses[keyof LogoutResponses];
+
+export type ListInvitesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/invites';
+};
+
+export type ListInvitesErrors = {
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+};
+
+export type ListInvitesError = ListInvitesErrors[keyof ListInvitesErrors];
+
+export type ListInvitesResponses = {
+    /**
+     * OK.
+     */
+    200: Array<Invite>;
+};
+
+export type ListInvitesResponse = ListInvitesResponses[keyof ListInvitesResponses];
+
+export type CreateInviteData = {
+    body: {
+        /**
+         * Optional. Binds the invite to this address (the new account uses it).
+         */
+        email?: string;
+        grantsOrgAdmin?: boolean;
+        /**
+         * Optional; must be in the future and within 90 days.
+         */
+        expiresAt?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/invites';
+};
+
+export type CreateInviteErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type CreateInviteError = CreateInviteErrors[keyof CreateInviteErrors];
+
+export type CreateInviteResponses = {
+    /**
+     * Created.
+     */
+    201: InviteCreated;
+};
+
+export type CreateInviteResponse = CreateInviteResponses[keyof CreateInviteResponses];
+
+export type RevokeInviteData = {
+    body?: never;
+    path: {
+        inviteId: string;
+    };
+    query?: never;
+    url: '/invites/{inviteId}';
+};
+
+export type RevokeInviteErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type RevokeInviteError = RevokeInviteErrors[keyof RevokeInviteErrors];
+
+export type RevokeInviteResponses = {
+    /**
+     * Revoked.
+     */
+    204: void;
+};
+
+export type RevokeInviteResponse = RevokeInviteResponses[keyof RevokeInviteResponses];
+
+export type ResolveInviteData = {
+    body?: never;
+    path: {
+        token: string;
+    };
+    query?: never;
+    url: '/invites/{token}';
+};
+
+export type ResolveInviteErrors = {
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The token/link was used, revoked or has expired.
+     */
+    410: Error;
+    /**
+     * Rate limited. `Retry-After` says how many seconds to wait.
+     */
+    429: Error;
+};
+
+export type ResolveInviteError = ResolveInviteErrors[keyof ResolveInviteErrors];
+
+export type ResolveInviteResponses = {
+    /**
+     * The invite is usable.
+     */
+    200: {
+        /**
+         * Prefill (and fixed) when the invite is bound to an address.
+         */
+        email: string | null;
+        expiresAt: string | null;
+    };
+};
+
+export type ResolveInviteResponse = ResolveInviteResponses[keyof ResolveInviteResponses];
+
+export type RedeemInviteData = {
+    body: {
+        email?: string;
+        displayName: string;
+        password: string;
+    };
+    path: {
+        token: string;
+    };
+    query?: never;
+    url: '/invites/{token}/redeem';
+};
+
+export type RedeemInviteErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+    /**
+     * The token/link was used, revoked or has expired.
+     */
+    410: Error;
+    /**
+     * Rate limited. `Retry-After` says how many seconds to wait.
+     */
+    429: Error;
+};
+
+export type RedeemInviteError = RedeemInviteErrors[keyof RedeemInviteErrors];
+
+export type RedeemInviteResponses = {
+    /**
+     * Account created and signed in.
+     */
+    201: Session;
+};
+
+export type RedeemInviteResponse = RedeemInviteResponses[keyof RedeemInviteResponses];
+
+export type ListUsersData = {
+    body?: never;
+    path?: never;
+    query?: {
+        q?: string;
+        limit?: number;
+        offset?: number;
+    };
+    url: '/users';
+};
+
+export type ListUsersErrors = {
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+};
+
+export type ListUsersError = ListUsersErrors[keyof ListUsersErrors];
+
+export type ListUsersResponses = {
+    /**
+     * OK.
+     */
+    200: Array<User>;
+};
+
+export type ListUsersResponse = ListUsersResponses[keyof ListUsersResponses];
+
+export type SetUserDisabledData = {
+    body: {
+        disabled: boolean;
+    };
+    path: {
+        userId: string;
+    };
+    query?: never;
+    url: '/users/{userId}';
+};
+
+export type SetUserDisabledErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type SetUserDisabledError = SetUserDisabledErrors[keyof SetUserDisabledErrors];
+
+export type SetUserDisabledResponses = {
+    /**
+     * Updated.
+     */
+    200: User;
+};
+
+export type SetUserDisabledResponse = SetUserDisabledResponses[keyof SetUserDisabledResponses];
+
+export type ListSpaceMembersData = {
+    body?: never;
+    path: {
+        spaceId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}/members';
+};
+
+export type ListSpaceMembersErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+};
+
+export type ListSpaceMembersError = ListSpaceMembersErrors[keyof ListSpaceMembersErrors];
+
+export type ListSpaceMembersResponses = {
+    /**
+     * OK.
+     */
+    200: Array<SpaceMember>;
+};
+
+export type ListSpaceMembersResponse = ListSpaceMembersResponses[keyof ListSpaceMembersResponses];
+
+export type AddSpaceMemberData = {
+    body: {
+        userId: string;
+        role: SpaceRole;
+    };
+    path: {
+        spaceId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}/members';
+};
+
+export type AddSpaceMemberErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type AddSpaceMemberError = AddSpaceMemberErrors[keyof AddSpaceMemberErrors];
+
+export type AddSpaceMemberResponses = {
+    /**
+     * Added.
+     */
+    201: SpaceMemberRow;
+};
+
+export type AddSpaceMemberResponse = AddSpaceMemberResponses[keyof AddSpaceMemberResponses];
+
+export type RemoveSpaceMemberData = {
+    body?: never;
+    path: {
+        spaceId: string;
+        userId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}/members/{userId}';
+};
+
+export type RemoveSpaceMemberErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type RemoveSpaceMemberError = RemoveSpaceMemberErrors[keyof RemoveSpaceMemberErrors];
+
+export type RemoveSpaceMemberResponses = {
+    /**
+     * Removed (or was not a member).
+     */
+    204: void;
+};
+
+export type RemoveSpaceMemberResponse = RemoveSpaceMemberResponses[keyof RemoveSpaceMemberResponses];
+
+export type UpdateSpaceMemberData = {
+    body: {
+        role: SpaceRole;
+    };
+    path: {
+        spaceId: string;
+        userId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}/members/{userId}';
+};
+
+export type UpdateSpaceMemberErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type UpdateSpaceMemberError = UpdateSpaceMemberErrors[keyof UpdateSpaceMemberErrors];
+
+export type UpdateSpaceMemberResponses = {
+    /**
+     * Updated.
+     */
+    200: SpaceMemberRow;
+};
+
+export type UpdateSpaceMemberResponse = UpdateSpaceMemberResponses[keyof UpdateSpaceMemberResponses];
+
+export type SearchMemberCandidatesData = {
+    body?: never;
+    path: {
+        spaceId: string;
+    };
+    query: {
+        q: string;
+    };
+    url: '/spaces/{spaceId}/member-candidates';
+};
+
+export type SearchMemberCandidatesErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+};
+
+export type SearchMemberCandidatesError = SearchMemberCandidatesErrors[keyof SearchMemberCandidatesErrors];
+
+export type SearchMemberCandidatesResponses = {
+    /**
+     * OK.
+     */
+    200: Array<MemberCandidate>;
+};
+
+export type SearchMemberCandidatesResponse = SearchMemberCandidatesResponses[keyof SearchMemberCandidatesResponses];
+
+export type AddSpaceGroupMemberData = {
+    body: {
+        groupId: string;
+        role: SpaceRole;
+    };
+    path: {
+        spaceId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}/group-members';
+};
+
+export type AddSpaceGroupMemberErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type AddSpaceGroupMemberError = AddSpaceGroupMemberErrors[keyof AddSpaceGroupMemberErrors];
+
+export type AddSpaceGroupMemberResponses = {
+    /**
+     * Added.
+     */
+    201: SpaceMemberRow;
+};
+
+export type AddSpaceGroupMemberResponse = AddSpaceGroupMemberResponses[keyof AddSpaceGroupMemberResponses];
+
+export type RemoveSpaceGroupMemberData = {
+    body?: never;
+    path: {
+        spaceId: string;
+        groupId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}/group-members/{groupId}';
+};
+
+export type RemoveSpaceGroupMemberErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type RemoveSpaceGroupMemberError = RemoveSpaceGroupMemberErrors[keyof RemoveSpaceGroupMemberErrors];
+
+export type RemoveSpaceGroupMemberResponses = {
+    /**
+     * Removed.
+     */
+    204: void;
+};
+
+export type RemoveSpaceGroupMemberResponse = RemoveSpaceGroupMemberResponses[keyof RemoveSpaceGroupMemberResponses];
+
+export type UpdateSpaceGroupMemberData = {
+    body: {
+        role: SpaceRole;
+    };
+    path: {
+        spaceId: string;
+        groupId: string;
+    };
+    query?: never;
+    url: '/spaces/{spaceId}/group-members/{groupId}';
+};
+
+export type UpdateSpaceGroupMemberErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The request conflicts with current state (the `error` message says how).
+     */
+    409: Error;
+};
+
+export type UpdateSpaceGroupMemberError = UpdateSpaceGroupMemberErrors[keyof UpdateSpaceGroupMemberErrors];
+
+export type UpdateSpaceGroupMemberResponses = {
+    /**
+     * Updated.
+     */
+    200: SpaceMemberRow;
+};
+
+export type UpdateSpaceGroupMemberResponse = UpdateSpaceGroupMemberResponses[keyof UpdateSpaceGroupMemberResponses];
+
+export type SearchGroupCandidatesData = {
+    body?: never;
+    path: {
+        spaceId: string;
+    };
+    query?: {
+        q?: string;
+    };
+    url: '/spaces/{spaceId}/group-candidates';
+};
+
+export type SearchGroupCandidatesErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+};
+
+export type SearchGroupCandidatesError = SearchGroupCandidatesErrors[keyof SearchGroupCandidatesErrors];
+
+export type SearchGroupCandidatesResponses = {
+    /**
+     * OK.
+     */
+    200: Array<GroupCandidate>;
+};
+
+export type SearchGroupCandidatesResponse = SearchGroupCandidatesResponses[keyof SearchGroupCandidatesResponses];
+
+export type SearchSpaceData = {
+    body?: never;
+    path: {
+        spaceId: string;
+    };
+    query: {
+        q: string;
+    };
+    url: '/spaces/{spaceId}/search';
+};
+
+export type SearchSpaceErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+};
+
+export type SearchSpaceError = SearchSpaceErrors[keyof SearchSpaceErrors];
+
+export type SearchSpaceResponses = {
+    /**
+     * OK.
+     */
+    200: Array<{
+        id: string;
+        title: string;
+    }>;
+};
+
+export type SearchSpaceResponse = SearchSpaceResponses[keyof SearchSpaceResponses];
+
+export type ExportSpaceData = {
+    body?: never;
+    path: {
+        spaceId: string;
+    };
+    query: {
+        format: 'md' | 'html' | 'pdf';
+    };
+    url: '/spaces/{spaceId}/export';
+};
+
+export type ExportSpaceErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * Too many pages to export at once (limit 2000).
+     */
+    413: unknown;
+};
+
+export type ExportSpaceError = ExportSpaceErrors[keyof ExportSpaceErrors];
+
+export type ExportSpaceResponses = {
+    /**
+     * The exported file. `md`: text/markdown; `html`: text/html; zip for multiple pages; `pdf`: print-optimised text/html served inline. Fetch with the bearer token and use a blob URL (Decision 34).
+     */
+    200: string;
+};
+
+export type ExportSpaceResponse = ExportSpaceResponses[keyof ExportSpaceResponses];
+
+export type ListPageTemplatesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/page-templates';
+};
+
+export type ListPageTemplatesErrors = {
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+};
+
+export type ListPageTemplatesError = ListPageTemplatesErrors[keyof ListPageTemplatesErrors];
+
+export type ListPageTemplatesResponses = {
+    /**
+     * OK.
+     */
+    200: Array<PageTemplate>;
+};
+
+export type ListPageTemplatesResponse = ListPageTemplatesResponses[keyof ListPageTemplatesResponses];
+
+export type MovePageData = {
+    body: {
+        parentId?: string | null;
+        position: number;
+    };
+    path: {
+        pageId: string;
+    };
+    query?: never;
+    url: '/pages/{pageId}/move';
+};
+
+export type MovePageErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type MovePageError = MovePageErrors[keyof MovePageErrors];
+
+export type MovePageResponses = {
+    /**
+     * Moved.
+     */
+    200: Page;
+};
+
+export type MovePageResponse = MovePageResponses[keyof MovePageResponses];
+
+export type SetPageLockedData = {
+    body: {
+        locked: boolean;
+    };
+    path: {
+        pageId: string;
+    };
+    query?: never;
+    url: '/pages/{pageId}/lock';
+};
+
+export type SetPageLockedErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type SetPageLockedError = SetPageLockedErrors[keyof SetPageLockedErrors];
+
+export type SetPageLockedResponses = {
+    /**
+     * Updated.
+     */
+    200: Page;
+};
+
+export type SetPageLockedResponse = SetPageLockedResponses[keyof SetPageLockedResponses];
+
+export type ExportPageData = {
+    body?: never;
+    path: {
+        pageId: string;
+    };
+    query: {
+        format: 'md' | 'html' | 'pdf';
+        descendants?: boolean;
+    };
+    url: '/pages/{pageId}/export';
+};
+
+export type ExportPageErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * Too many pages to export at once (limit 2000).
+     */
+    413: unknown;
+};
+
+export type ExportPageError = ExportPageErrors[keyof ExportPageErrors];
+
+export type ExportPageResponses = {
+    /**
+     * The exported file. `md`: text/markdown; `html`: text/html; zip for multiple pages; `pdf`: print-optimised text/html served inline. Fetch with the bearer token and use a blob URL (Decision 34).
+     */
+    200: string;
+};
+
+export type ExportPageResponse = ExportPageResponses[keyof ExportPageResponses];
+
+export type ListPageRevisionsData = {
+    body?: never;
+    path: {
+        pageId: string;
+    };
+    query?: {
+        limit?: number;
+        offset?: number;
+    };
+    url: '/pages/{pageId}/revisions';
+};
+
+export type ListPageRevisionsErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type ListPageRevisionsError = ListPageRevisionsErrors[keyof ListPageRevisionsErrors];
+
+export type ListPageRevisionsResponses = {
+    /**
+     * OK.
+     */
+    200: Array<PageRevision>;
+};
+
+export type ListPageRevisionsResponse = ListPageRevisionsResponses[keyof ListPageRevisionsResponses];
+
+export type GetPageRevisionData = {
+    body?: never;
+    path: {
+        pageId: string;
+        revisionId: string;
+    };
+    query?: never;
+    url: '/pages/{pageId}/revisions/{revisionId}';
+};
+
+export type GetPageRevisionErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type GetPageRevisionError = GetPageRevisionErrors[keyof GetPageRevisionErrors];
+
+export type GetPageRevisionResponses = {
+    /**
+     * OK.
+     */
+    200: PageRevisionDetail;
+};
+
+export type GetPageRevisionResponse = GetPageRevisionResponses[keyof GetPageRevisionResponses];
+
+export type RestorePageRevisionData = {
+    body?: never;
+    path: {
+        pageId: string;
+        revisionId: string;
+    };
+    query?: never;
+    url: '/pages/{pageId}/revisions/{revisionId}/restore';
+};
+
+export type RestorePageRevisionErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type RestorePageRevisionError = RestorePageRevisionErrors[keyof RestorePageRevisionErrors];
+
+export type RestorePageRevisionResponses = {
+    /**
+     * Restored.
+     */
+    200: Page;
+};
+
+export type RestorePageRevisionResponse = RestorePageRevisionResponses[keyof RestorePageRevisionResponses];
+
+export type ListShareLinksData = {
+    body?: never;
+    path: {
+        pageId: string;
+    };
+    query?: never;
+    url: '/pages/{pageId}/share-links';
+};
+
+export type ListShareLinksErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type ListShareLinksError = ListShareLinksErrors[keyof ListShareLinksErrors];
+
+export type ListShareLinksResponses = {
+    /**
+     * OK.
+     */
+    200: Array<ShareLink>;
+};
+
+export type ListShareLinksResponse = ListShareLinksResponses[keyof ListShareLinksResponses];
+
+export type CreateShareLinkData = {
+    body: {
+        permission: 'view' | 'edit';
+        /**
+         * Optional; stored as an argon2id hash.
+         */
+        password?: string;
+        /**
+         * Optional; must be in the future.
+         */
+        expiresAt?: string;
+    };
+    path: {
+        pageId: string;
+    };
+    query?: never;
+    url: '/pages/{pageId}/share-links';
+};
+
+export type CreateShareLinkErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type CreateShareLinkError = CreateShareLinkErrors[keyof CreateShareLinkErrors];
+
+export type CreateShareLinkResponses = {
+    /**
+     * Created.
+     */
+    201: ShareLink;
+};
+
+export type CreateShareLinkResponse = CreateShareLinkResponses[keyof CreateShareLinkResponses];
+
+export type RevokeShareLinkData = {
+    body?: never;
+    path: {
+        shareLinkId: string;
+    };
+    query?: never;
+    url: '/share-links/{shareLinkId}';
+};
+
+export type RevokeShareLinkErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type RevokeShareLinkError = RevokeShareLinkErrors[keyof RevokeShareLinkErrors];
+
+export type RevokeShareLinkResponses = {
+    /**
+     * Revoked.
+     */
+    204: void;
+};
+
+export type RevokeShareLinkResponse = RevokeShareLinkResponses[keyof RevokeShareLinkResponses];
+
+export type ListShareLinkAccessLogData = {
+    body?: never;
+    path: {
+        shareLinkId: string;
+    };
+    query?: {
+        limit?: number;
+        offset?: number;
+    };
+    url: '/share-links/{shareLinkId}/access-log';
+};
+
+export type ListShareLinkAccessLogErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+    /**
+     * Not found.
+     */
+    404: Error;
+};
+
+export type ListShareLinkAccessLogError = ListShareLinkAccessLogErrors[keyof ListShareLinkAccessLogErrors];
+
+export type ListShareLinkAccessLogResponses = {
+    /**
+     * OK.
+     */
+    200: Array<ShareLinkAccessLogEntry>;
+};
+
+export type ListShareLinkAccessLogResponse = ListShareLinkAccessLogResponses[keyof ListShareLinkAccessLogResponses];
+
+export type ResolveShareLinkData = {
+    body?: never;
+    path: {
+        token: string;
+    };
+    query?: never;
+    url: '/share/{token}';
+};
+
+export type ResolveShareLinkErrors = {
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The token/link was used, revoked or has expired.
+     */
+    410: Error;
+    /**
+     * Rate limited. `Retry-After` says how many seconds to wait.
+     */
+    429: Error;
+};
+
+export type ResolveShareLinkError = ResolveShareLinkErrors[keyof ResolveShareLinkErrors];
+
+export type ResolveShareLinkResponses = {
+    /**
+     * OK.
+     */
+    200: {
+        requiresPassword: boolean;
+        permission: 'view' | 'edit';
+        pageTitle?: string;
+    };
+};
+
+export type ResolveShareLinkResponse = ResolveShareLinkResponses[keyof ResolveShareLinkResponses];
+
+export type RedeemShareLinkData = {
+    body: {
+        displayName: string;
+        password?: string;
+    };
+    path: {
+        token: string;
+    };
+    query?: never;
+    url: '/share/{token}/redeem';
+};
+
+export type RedeemShareLinkErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Wrong link password.
+     */
+    401: unknown;
+    /**
+     * Not found.
+     */
+    404: Error;
+    /**
+     * The token/link was used, revoked or has expired.
+     */
+    410: Error;
+    /**
+     * Rate limited. `Retry-After` says how many seconds to wait.
+     */
+    429: Error;
+};
+
+export type RedeemShareLinkError = RedeemShareLinkErrors[keyof RedeemShareLinkErrors];
+
+export type RedeemShareLinkResponses = {
+    /**
+     * Redeemed.
+     */
+    200: {
+        token: string;
+        permission: 'view' | 'edit';
+        pageId: string;
+    };
+};
+
+export type RedeemShareLinkResponse = RedeemShareLinkResponses[keyof RedeemShareLinkResponses];
+
+export type GetAdminSettingsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/admin/settings';
+};
+
+export type GetAdminSettingsErrors = {
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+};
+
+export type GetAdminSettingsError = GetAdminSettingsErrors[keyof GetAdminSettingsErrors];
+
+export type GetAdminSettingsResponses = {
+    /**
+     * OK.
+     */
+    200: AdminSettings;
+};
+
+export type GetAdminSettingsResponse = GetAdminSettingsResponses[keyof GetAdminSettingsResponses];
+
+export type UpdateAdminSettingsData = {
+    body: {
+        internalLoginDisabled?: boolean;
+        attachmentAllowlist?: Array<string> | null;
+        attachmentMaxSizeBytes?: number | null;
+    };
+    path?: never;
+    query?: never;
+    url: '/admin/settings';
+};
+
+export type UpdateAdminSettingsErrors = {
+    /**
+     * A path parameter is not a valid UUID, or the request body is malformed.
+     */
+    400: Error;
+    /**
+     * Missing or invalid bearer token.
+     */
+    401: Error;
+    /**
+     * The caller's role does not allow this action.
+     */
+    403: Error;
+};
+
+export type UpdateAdminSettingsError = UpdateAdminSettingsErrors[keyof UpdateAdminSettingsErrors];
+
+export type UpdateAdminSettingsResponses = {
+    /**
+     * Updated.
+     */
+    200: AdminSettings;
+};
+
+export type UpdateAdminSettingsResponse = UpdateAdminSettingsResponses[keyof UpdateAdminSettingsResponses];

@@ -2,13 +2,18 @@
   <v-container fluid>
     <v-alert v-if="loadError" density="compact" type="error">{{ loadError }}</v-alert>
     <v-progress-linear v-else-if="pagesStore.pageLoading && !pagesStore.currentPage" indeterminate />
-    <PageEditor v-else-if="pagesStore.currentPage" :key="pagesStore.currentPage.id" :page="pagesStore.currentPage" />
+
+    <template v-else-if="pagesStore.currentPage">
+      <PageActions :page="pagesStore.currentPage" />
+      <PageEditor :key="`${pagesStore.currentPage.id}:${pagesStore.editorEpoch}`" :page="pagesStore.currentPage" />
+    </template>
   </v-container>
 </template>
 
 <script lang="ts" setup>
   import { ref, watch } from 'vue'
   import { useI18n } from 'vue-i18n'
+  import PageActions from '@/components/PageActions.vue'
   import PageEditor from '@/components/PageEditor.vue'
   import { usePagesStore } from '@/stores/pages'
 

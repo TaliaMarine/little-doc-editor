@@ -24,3 +24,26 @@ export function roleAtLeast (role: SpaceRole | null | undefined, min: SpaceRole)
 export function canEditPage (page: Pick<Page, 'can_edit' | 'locked'>): boolean {
   return page.can_edit && !page.locked
 }
+
+// Delete / lock / add-sub-page: editor+ space members only (Decision 46). A
+// share-link guest has no role (null), so an edit link never unlocks these.
+export function canManagePage (page: Pick<Page, 'my_role'>): boolean {
+  return roleAtLeast(page.my_role, 'editor')
+}
+
+// Share links (create/list/revoke) and their access log: editor+ space role,
+// members only (Decisions 16, 24). Guests have no role, so never.
+export function canManageShareLinks (page: Pick<Page, 'my_role'>): boolean {
+  return roleAtLeast(page.my_role, 'editor')
+}
+
+// Revision history is browsable by any space member (viewer+, Decision 30);
+// share-link guests have no role and never see it (Decision 42).
+export function canViewHistory (page: Pick<Page, 'my_role'>): boolean {
+  return roleAtLeast(page.my_role, 'viewer')
+}
+
+// Restore stays editor+ (Decision 30) and is refused on locked pages.
+export function canRestoreRevision (page: Pick<Page, 'my_role' | 'locked'>): boolean {
+  return roleAtLeast(page.my_role, 'editor') && !page.locked
+}

@@ -32,6 +32,12 @@ import (
 // of what token (if any) is sent. t.Setenv scopes the override to this test
 // and restores the previous value afterward.
 func newRealAuthTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, config.Config) {
+	return newRealAuthTestServerWith(t, nil)
+}
+
+// newRealAuthTestServerWith is newRealAuthTestServer with extra env overrides
+// (applied last, so they win), for tests of config-dependent behaviour.
+func newRealAuthTestServerWith(t *testing.T, extra map[string]string) (*httptest.Server, *pgxpool.Pool, config.Config) {
 	t.Helper()
 
 	if _, ok := os.LookupEnv("DATABASE_URL"); !ok {
@@ -45,6 +51,10 @@ func newRealAuthTestServer(t *testing.T) (*httptest.Server, *pgxpool.Pool, confi
 	// seedOrgAdmin instead of relying on it.
 	t.Setenv("BOOTSTRAP_ADMIN_EMAIL", "")
 	t.Setenv("BOOTSTRAP_ADMIN_PASSWORD", "")
+	t.Setenv("RATE_LIMIT_ENABLED", "false") // the limiter has its own test
+	for k, v := range extra {
+		t.Setenv(k, v)
+	}
 
 	cfg, err := config.Load()
 	if err != nil {

@@ -28,6 +28,10 @@ func CanAccessPage(ctx context.Context, queries *db.Queries, identity authctx.Id
 	if identity.ShareLinkPageID == nil {
 		return false, nil
 	}
+	// Guests never hold admin/owner-level rights, whatever the link says.
+	if min > RoleEditor {
+		return false, nil
+	}
 	// A view-permission link never covers an edit-requiring action.
 	if min >= RoleEditor && identity.SharePermission != "edit" {
 		return false, nil

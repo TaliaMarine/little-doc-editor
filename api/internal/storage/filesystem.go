@@ -72,3 +72,14 @@ func (s *FilesystemStorage) Get(_ context.Context, key string) (io.ReadCloser, e
 	}
 	return f, nil
 }
+
+func (s *FilesystemStorage) Delete(_ context.Context, key string) error {
+	p, err := s.path(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("deleting %q: %w", key, err)
+	}
+	return nil
+}

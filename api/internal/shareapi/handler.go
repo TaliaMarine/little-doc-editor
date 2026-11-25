@@ -13,8 +13,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,10 +25,12 @@ import (
 
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authctx"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authz"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/clientip"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/config"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/db"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/httpx"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/passwordhash"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/ratelimit"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/sessionrecord"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/sessiontoken"
 )
@@ -37,11 +39,19 @@ type Handler struct {
 	queries *db.Queries
 	cfg     config.Config
 	logger  *slog.Logger
+	ips     *clientip.Resolver
+	limiter *ratelimit.Limiter
 }
 
-func NewHandler(queries *db.Queries, cfg config.Config, logger *slog.Logger) *Handler {
-	return &Handler{queries: queries, cfg: cfg, logger: logger}
+func NewHandler(queries *db.Queries, cfg config.Config, logger *slog.Logger, ips *clientip.Resolver, limiter *ratelimit.Limiter) *Handler {
+	return &Handler{queries: queries, cfg: cfg, logger: logger, ips: ips, limiter: limiter}
 }
+
+const (
+	maxPasswordGuessesPerClient = 10  // failed link-password attempts per (link, client network) per window
+	maxPasswordGuessesPerLink   = 100 // ... and across all clients
+	passwordGuessWindow         = 15 * time.Minute
+)
 
 // PublicRoutes need no existing session — redeeming a link is how an
 // anonymous visitor gets one (SPEC.md Decision 6).
@@ -116,7 +126,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := h.queries.GetPageByID(r.Context(), db.ToPgUUID(pageID))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return
 	}
 
@@ -173,6 +183,10 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, "expiresAt must be RFC3339")
 			return
 		}
+		if !t.After(time.Now()) {
+			httpx.WriteError(w, http.StatusBadRequest, "expiresAt must be in the future")
+			return
+		}
 		params.ExpiresAt = pgtype.Timestamptz{Time: t, Valid: true}
 	}
 
@@ -193,7 +207,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := h.queries.GetPageByID(r.Context(), db.ToPgUUID(pageID))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return
 	}
 	identity := authctx.FromContext(r.Context())
@@ -258,13 +272,42 @@ func (h *Handler) accessLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logs, err := h.queries.ListShareLinkAccessLogs(r.Context(), db.ToPgUUID(id))
+	limit, offset := int32(100), int32(0)
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 && n <= 500 {
+		limit = int32(n)
+	}
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n > 0 {
+		offset = int32(n)
+	}
+	logs, err := h.queries.ListShareLinkAccessLogs(r.Context(), db.ListShareLinkAccessLogsParams{
+		ShareLinkID: db.ToPgUUID(id), Limit: limit, Offset: offset,
+	})
 	if err != nil {
 		h.logger.Error("list share link access logs failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to load access log")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, logs)
+	out := make([]accessLogResponse, len(logs))
+	for i, l := range logs {
+		out[i] = accessLogResponse{
+			ID: l.ID, ShareLinkID: l.ShareLinkID, AccessedAt: l.AccessedAt, IPHash: l.IpHash, UserAgent: l.UserAgent,
+			ViewerUserID: l.ViewerUserID, ViewerGuestID: l.ViewerGuestID,
+			ViewerUserDisplayName: l.ViewerUserDisplayName, ViewerGuestDisplayName: l.ViewerGuestDisplayName,
+		}
+	}
+	httpx.WriteJSON(w, http.StatusOK, out)
+}
+
+type accessLogResponse struct {
+	ID                     pgtype.UUID        `json:"id"`
+	ShareLinkID            pgtype.UUID        `json:"share_link_id"`
+	AccessedAt             pgtype.Timestamptz `json:"accessed_at"`
+	IPHash                 string             `json:"ip_hash"`
+	UserAgent              *string            `json:"user_agent"`
+	ViewerUserID           pgtype.UUID        `json:"viewer_user_id"`
+	ViewerGuestID          pgtype.UUID        `json:"viewer_guest_id"`
+	ViewerUserDisplayName  *string            `json:"viewer_user_display_name"`
+	ViewerGuestDisplayName *string            `json:"viewer_guest_display_name"`
 }
 
 // loadLinkPage returns the page a share link (by ID) belongs to, writing a
@@ -272,12 +315,12 @@ func (h *Handler) accessLog(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) loadLinkPage(w http.ResponseWriter, r *http.Request, id uuid.UUID) (db.Page, bool) {
 	link, err := h.queries.GetShareLinkByID(r.Context(), db.ToPgUUID(id))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "share link not found")
+		httpx.WriteLookupError(w, h.logger, err, "share link not found")
 		return db.Page{}, false
 	}
 	page, err := h.queries.GetPageByID(r.Context(), link.PageID)
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return db.Page{}, false
 	}
 	return page, true
@@ -292,7 +335,7 @@ type resolveResponse struct {
 func (h *Handler) resolve(w http.ResponseWriter, r *http.Request) {
 	link, err := h.queries.GetShareLinkByToken(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "share link not found")
+		httpx.WriteLookupError(w, h.logger, err, "share link not found")
 		return
 	}
 	if status, msg := linkStatus(link); status != 0 {
@@ -320,7 +363,7 @@ type redeemRequest struct {
 func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 	link, err := h.queries.GetShareLinkByToken(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "share link not found")
+		httpx.WriteLookupError(w, h.logger, err, "share link not found")
 		return
 	}
 	if status, msg := linkStatus(link); status != 0 {
@@ -329,14 +372,33 @@ func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req redeemRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
 
 	if link.PasswordHash != nil {
+		// Only failed guesses count, per (link, client network) and per link
+		// overall, so rotating source addresses can't brute-force a weak link
+		// password past the per-IP request limiter.
+		linkKey := db.FromPgUUID(link.ID).String()
+		clientKey := linkKey + "|" + h.limiter.ClientKey(r)
+		if n, retry := h.limiter.Count(r.Context(), "share-pw-client", clientKey); n >= maxPasswordGuessesPerClient {
+			ratelimit.Reject(w, retry)
+			return
+		}
+		if n, retry := h.limiter.Count(r.Context(), "share-pw-link", linkKey); n >= maxPasswordGuessesPerLink {
+			ratelimit.Reject(w, retry)
+			return
+		}
+		if len(req.Password) > 1024 {
+			httpx.WriteError(w, http.StatusUnauthorized, "incorrect password")
+			return
+		}
 		ok, err := passwordhash.Verify(req.Password, *link.PasswordHash)
 		if err != nil || !ok {
+			h.limiter.Allow(r.Context(), "share-pw-client", clientKey, maxPasswordGuessesPerClient, passwordGuessWindow)
+			h.limiter.Allow(r.Context(), "share-pw-link", linkKey, maxPasswordGuessesPerLink, passwordGuessWindow)
 			httpx.WriteError(w, http.StatusUnauthorized, "incorrect password")
 			return
 		}
@@ -379,7 +441,15 @@ func (h *Handler) redeem(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("recording guest session row failed", "error", err)
 	}
 
-	h.logAccess(r, link.ID, nil, &guest.ID)
+	// A signed-in user opening the link (the SPA sends their bearer token)
+	// is recorded as the viewer too, so the log names real accounts
+	// (SPEC.md §6.6) — the guest session is still issued as before.
+	var viewerUser *pgtype.UUID
+	if uid := authctx.OptionalUserID(r, h.cfg.SessionJWTSecret, h.queries); uid != nil {
+		v := db.ToPgUUID(*uid)
+		viewerUser = &v
+	}
+	h.logAccess(r, link.ID, viewerUser, &guest.ID)
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"token":      token,
@@ -423,11 +493,11 @@ func (h *Handler) logAccess(r *http.Request, linkID pgtype.UUID, userID, guestID
 // plain unkeyed SHA-256 would not achieve that: the whole IPv4 space is small
 // enough to brute-force back to the address in minutes, so the hash is an
 // HMAC keyed with a secret derived from the session signing secret.
+//
+// The address is the client IP resolved through the trusted-proxy config
+// (TRUSTED_PROXIES), so behind an ingress it is the visitor, not the ingress.
 func (h *Handler) hashIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
+	host := h.ips.IP(r)
 	mac := hmac.New(sha256.New, []byte("share-access-log-ip:"+h.cfg.SessionJWTSecret))
 	mac.Write([]byte(host))
 	return hex.EncodeToString(mac.Sum(nil))

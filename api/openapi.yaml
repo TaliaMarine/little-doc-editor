@@ -35,6 +35,8 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "401":
           description: Wrong email/password.
           content:
@@ -117,6 +119,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "400": { $ref: "#/components/responses/BadRequest" }
         "409":
           description: A space with this slug already exists.
           content:
@@ -124,6 +127,49 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
 
   /spaces/{spaceId}:
+    patch:
+      operationId: updateSpace
+      summary: >-
+        Rename a space or change its icon / history policy (Decision 9). Space
+        owner/admin only (Decision 24). An absent field is unchanged; `null`
+        clears the icon or removes a history limit (no limit on that axis).
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                icon: { type: string, nullable: true, maxLength: 64 }
+                historyMaxCount: { type: integer, minimum: 1, maximum: 100000, nullable: true, description: Max revisions kept per page. }
+                historyMaxAgeDays: { type: integer, minimum: 1, maximum: 36500, nullable: true, description: Max revision age in days. }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Space" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: deleteSpace
+      summary: >-
+        Delete a space and everything in it (pages, revisions, attachments and
+        their stored files, share links). Space owner only (org admins pass).
+        Irreversible.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "204": { description: Deleted. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
     get:
       operationId: getSpace
       summary: Get a space by ID. Requires viewer+ space role.
@@ -172,6 +218,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
     post:
       operationId: createPage
       summary: Create a page in a space. Requires editor+ space role.
@@ -183,14 +230,18 @@ paths:
           application/json:
             schema:
               type: object
-              required: [title]
               properties:
                 parentId: { type: string, format: uuid, nullable: true }
-                title: { type: string }
+                title:
+                  type: string
+                  description: Required unless `templateKey` is given (then defaults to the template's default title).
                 content:
-                  description: ProseMirror/Tiptap JSON (SPEC.md Decision 4).
+                  description: ProseMirror/Tiptap JSON (SPEC.md Decision 4). Mutually exclusive with `templateKey`.
                   type: object
                   additionalProperties: true
+                templateKey:
+                  type: string
+                  description: Create the page from a built-in template (see listPageTemplates). Unknown key -> 400.
       responses:
         "201":
           description: Created.
@@ -211,6 +262,22 @@ paths:
               schema: { $ref: "#/components/schemas/Error" }
 
   /pages/{pageId}:
+    delete:
+      operationId: deletePage
+      summary: >-
+        Delete a page together with its descendants, attachments (rows and
+        stored files), revisions and share links (Decision 24: editors
+        delete). Editor+ space role, members only — share-link guests are
+        refused even with an edit link. 403 if the page or any subpage is locked
+        (unlock first). Irreversible.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      responses:
+        "204": { description: Deleted. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
     get:
       operationId: getPage
       summary: >-
@@ -242,10 +309,17 @@ paths:
     put:
       operationId: updatePageContent
       summary: >-
-        Replace a page's title/content. Requires editor+ space role, OR a
-        valid share-link guest session with edit permission scoped to this
-        page or an ancestor of it (SPEC.md Decision 21) — see
+        Update a page's title and/or content (at least one). Requires editor+
+        space role, OR a valid share-link guest session with edit permission
+        scoped to this page or an ancestor of it (SPEC.md Decision 21) — see
         authz.RequirePageAccess. Rejected if the page is locked.
+
+        **Renames must omit `content`**: a title-only request never touches
+        page content, so it cannot clobber live collaborative state (collab
+        owns content while a document is open). When `content` is present it
+        replaces the stored content, re-indexes search and may record a
+        revision (SPEC.md §6.7; same-author saves within the debounce window
+        do not create one). An omitted `title` keeps the current title.
       parameters:
         - $ref: "#/components/parameters/PageId"
       requestBody:
@@ -254,11 +328,10 @@ paths:
           application/json:
             schema:
               type: object
-              required: [title]
               properties:
-                title: { type: string }
+                title: { type: string, minLength: 1 }
                 content:
-                  description: ProseMirror/Tiptap JSON (SPEC.md Decision 4).
+                  description: ProseMirror/Tiptap JSON (SPEC.md Decision 4). Omit for a title-only rename.
                   type: object
                   additionalProperties: true
       responses:
@@ -399,6 +472,789 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: >-
+        Revoke the presented session token server-side. Takes effect on the
+        very next request (api and collab). Idempotent for a valid token;
+        a token that is already revoked gets 401 like any other request.
+      responses:
+        "204": { description: Session revoked. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /invites:
+    get:
+      operationId: listInvites
+      summary: List invites, newest first (org admin). Never includes tokens.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Invite" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createInvite
+      summary: >-
+        Create an invite (org admin; Decision 11/15, no SMTP). The response
+        carries the bearer `token` exactly once — only its hash is stored, so
+        it cannot be shown again. Build the link as `<origin>/invite/<token>`
+        and share it out-of-band. Default expiry 7 days, maximum 90.
+        409 if internal login is disabled instance-wide, or the email already
+        has an account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email, description: Optional. Binds the invite to this address (the new account uses it). }
+                grantsOrgAdmin: { type: boolean, default: false }
+                expiresAt: { type: string, format: date-time, description: Optional; must be in the future and within 90 days. }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InviteCreated" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /invites/{inviteId}:
+    delete:
+      operationId: revokeInvite
+      summary: Revoke a pending invite (org admin). 409 if it was already redeemed or revoked.
+      parameters:
+        - { name: inviteId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Revoked. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /invites/{token}:
+    get:
+      operationId: resolveInvite
+      summary: >-
+        Public. Check an invite token before showing the sign-up form.
+        404 unknown token; 410 already used, revoked or expired. Rate limited.
+      security: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The invite is usable.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [email, expiresAt]
+                properties:
+                  email: { type: string, nullable: true, description: Prefill (and fixed) when the invite is bound to an address. }
+                  expiresAt: { type: string, format: date-time, nullable: true }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /invites/{token}/redeem:
+    post:
+      operationId: redeemInvite
+      summary: >-
+        Public. Create the internal account (argon2id) and sign in. Password
+        10 to 128 characters. `email` is required only when the invite is not
+        bound to one (a bound invite always uses its own address).
+        Single use: concurrent redemptions yield exactly one account.
+        409 if the email already has an account (the invite is not consumed).
+        Rate limited.
+      security: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName, password]
+              properties:
+                email: { type: string, format: email }
+                displayName: { type: string, minLength: 1, maxLength: 80 }
+                password: { type: string, minLength: 10, maxLength: 128 }
+      responses:
+        "201":
+          description: Account created and signed in.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /users:
+    get:
+      operationId: listUsers
+      summary: User directory (org admin). `q` filters by email or display name.
+      parameters:
+        - { name: q, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 100, maximum: 500 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /users/{userId}:
+    patch:
+      operationId: setUserDisabled
+      summary: >-
+        Disable or re-enable an account (org admin). Disabling takes effect
+        on the next request. 409 when disabling yourself or the last enabled
+        org admin.
+      parameters:
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disabled]
+              properties:
+                disabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /spaces/{spaceId}/members:
+    get:
+      operationId: listSpaceMembers
+      summary: Members of a space — users and groups. Requires viewer+ space role.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SpaceMember" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: addSpaceMember
+      summary: >-
+        Add a user to the space (or change their role if already a member).
+        Space owner/admin only (granting or changing the `owner` role needs an
+        owner; otherwise 403). 409 if it would leave the space without a direct
+        (user) owner.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, role]
+              properties:
+                userId: { type: string, format: uuid }
+                role: { $ref: "#/components/schemas/SpaceRole" }
+      responses:
+        "201":
+          description: Added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceMemberRow" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /spaces/{spaceId}/members/{userId}:
+    patch:
+      operationId: updateSpaceMember
+      summary: Change a member's role. Space owner/admin (anything involving the `owner` role needs an owner, else 403). 409 if it would remove the last direct owner.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/SpaceRole" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceMemberRow" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: removeSpaceMember
+      summary: Remove a member (idempotent). Space owner/admin. 409 if it would remove the last owner.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Removed (or was not a member). }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /spaces/{spaceId}/member-candidates:
+    get:
+      operationId: searchMemberCandidates
+      summary: >-
+        Picker for "add member": enabled users who are not yet direct members,
+        matching `q` (min 2 characters) on email/display name. Space
+        owner/admin — no org-admin rights needed. At most 20 results.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 2 } }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/MemberCandidate" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /spaces/{spaceId}/group-members:
+    post:
+      operationId: addSpaceGroupMember
+      summary: >-
+        Grant a group a role in the space (or change it). Groups come from the
+        IdP groups claim and are created at OIDC login. A user's effective role
+        is the highest of their direct role, any of their groups' roles, and
+        the instance default. Space owner/admin. 409 on last-owner loss.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [groupId, role]
+              properties:
+                groupId: { type: string, format: uuid }
+                role: { $ref: "#/components/schemas/SpaceRole" }
+      responses:
+        "201":
+          description: Added.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceMemberRow" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /spaces/{spaceId}/group-members/{groupId}:
+    patch:
+      operationId: updateSpaceGroupMember
+      summary: Change a group's role in the space. Space owner/admin. 409 on last-owner loss.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - { name: groupId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/SpaceRole" }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpaceMemberRow" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    delete:
+      operationId: removeSpaceGroupMember
+      summary: Remove a group from the space (idempotent). Space owner/admin. 409 on last-owner loss.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - { name: groupId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Removed. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /spaces/{spaceId}/group-candidates:
+    get:
+      operationId: searchGroupCandidates
+      summary: Known groups for the "add group" picker (optional `q` name filter, max 50). Space owner/admin.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - { name: q, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/GroupCandidate" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /spaces/{spaceId}/search:
+    get:
+      operationId: searchSpace
+      summary: Full-text search over a space's pages (Postgres FTS). Requires viewer+ space role. Max 25 hits.
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - { name: q, in: query, required: true, schema: { type: string, minLength: 1 } }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [id, title]
+                  properties:
+                    id: { type: string, format: uuid }
+                    title: { type: string }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /spaces/{spaceId}/export:
+    get:
+      operationId: exportSpace
+      summary: >-
+        Export every page of a space. `md` / `html` return a zip whose folders
+        mirror the page tree; `pdf` returns one print-optimised HTML document
+        (page breaks, @page margins, images embedded) for the frontend to load
+        into an iframe and print — the api does not render PDFs. Requires
+        viewer+ space role (members only).
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - $ref: "#/components/parameters/ExportFormat"
+      responses:
+        "200": { $ref: "#/components/responses/ExportFile" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { description: Too many pages to export at once (limit 2000). }
+
+  /page-templates:
+    get:
+      operationId: listPageTemplates
+      summary: >-
+        The built-in page templates (Decision 22). Names/descriptions are
+        English; key them into the i18n catalog by `key`. Create a page from
+        one with createPage's `templateKey`.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PageTemplate" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /pages/{pageId}/move:
+    patch:
+      operationId: movePage
+      summary: >-
+        Reparent and/or reorder a page. Requires editor+ space role (members
+        only — share-link guests are refused even with an edit link).
+        `parentId` must be a page in the same space (else 400), may not be the
+        page itself or a descendant; omit/null for a root page. The server
+        persists `position` as given — compute the fractional midpoint between
+        the two flanking siblings client-side.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [position]
+              properties:
+                parentId: { type: string, format: uuid, nullable: true }
+                position: { type: number }
+      responses:
+        "200":
+          description: Moved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /pages/{pageId}/lock:
+    patch:
+      operationId: setPageLocked
+      summary: >-
+        Lock or unlock a page (read-only for everyone while locked, including
+        attachment uploads and revision restore). Editor+ space role, members
+        only.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [locked]
+              properties:
+                locked: { type: boolean }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /pages/{pageId}/export:
+    get:
+      operationId: exportPage
+      summary: >-
+        Export a page (optionally with its descendants). Single page: the
+        file itself (`md` / `html`). With descendants: a zip mirroring the
+        tree. `pdf`: one print-optimised HTML document for the frontend to
+        print (see exportSpace). Inline images are embedded in html/pdf;
+        Markdown references them as `attachment:<id>`. Requires view access
+        (viewer+ role, or a share-link guest whose link covers the page).
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+        - $ref: "#/components/parameters/ExportFormat"
+        - { name: descendants, in: query, required: false, schema: { type: boolean, default: false } }
+      responses:
+        "200": { $ref: "#/components/responses/ExportFile" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { description: Too many pages to export at once (limit 2000). }
+
+  /pages/{pageId}/revisions:
+    get:
+      operationId: listPageRevisions
+      summary: >-
+        Revision history, newest first, without content (SPEC.md §6.7).
+        Viewer+ space role (Decision 30) — members only; share-link guests get 403.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PageRevision" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /pages/{pageId}/revisions/{revisionId}:
+    get:
+      operationId: getPageRevision
+      summary: One revision including its content. Viewer+ space role, members only.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+        - { name: revisionId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PageRevisionDetail" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /pages/{pageId}/revisions/{revisionId}/restore:
+    post:
+      operationId: restorePageRevision
+      summary: >-
+        Make a revision the page's current content (Decision 30: editor+,
+        members only; 403 if the page is locked). The replaced state and the
+        restore are both recorded as revisions, so a restore is undoable; the
+        search index is refreshed. Returns the updated page.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+        - { name: revisionId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Restored.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Page" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /pages/{pageId}/share-links:
+    get:
+      operationId: listShareLinks
+      summary: Share links of a page (including revoked/expired). Editor+ space role, members only.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ShareLink" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      operationId: createShareLink
+      summary: >-
+        Create a share link for the page and its descendants (Decision 21).
+        Editor+ space role, members only. The response includes the opaque
+        `token`; the public link is `<origin>/share/<token>`.
+      parameters:
+        - $ref: "#/components/parameters/PageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permission]
+              properties:
+                permission: { type: string, enum: [view, edit] }
+                password: { type: string, description: Optional; stored as an argon2id hash. }
+                expiresAt: { type: string, format: date-time, description: Optional; must be in the future. }
+      responses:
+        "201":
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ShareLink" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /share-links/{shareLinkId}:
+    delete:
+      operationId: revokeShareLink
+      summary: Revoke a share link; guest sessions issued from it stop working immediately. Editor+ space role.
+      parameters:
+        - { name: shareLinkId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Revoked. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /share-links/{shareLinkId}/access-log:
+    get:
+      operationId: listShareLinkAccessLog
+      summary: >-
+        Who redeemed the link, newest first (Decision 16: visible to editors,
+        space admins/owners; not to viewers or guests). IPs are keyed hashes.
+        `viewer_user_id` is set when the redeemer was signed in (the SPA sends
+        its bearer token to the redeem call); the guest identity is always set.
+        Only redemption is logged, not each subsequent request.
+      parameters:
+        - { name: shareLinkId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 100, maximum: 500 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ShareLinkAccessLogEntry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /share/{token}:
+    get:
+      operationId: resolveShareLink
+      summary: >-
+        Public. Look up a share link before redeeming it (title is only shown
+        for password-less links). 404 unknown; 410 revoked/expired. Rate limited.
+      security: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requiresPassword, permission]
+                properties:
+                  requiresPassword: { type: boolean }
+                  permission: { type: string, enum: [view, edit] }
+                  pageTitle: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /share/{token}/redeem:
+    post:
+      operationId: redeemShareLink
+      summary: >-
+        Public. Exchange a link (plus password and the mandatory display name,
+        Decision 6) for a guest session token. If the caller sends a valid
+        bearer token the access log also records them as the viewer. Rate limited.
+      security: []
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [displayName]
+              properties:
+                displayName: { type: string, minLength: 1, maxLength: 80 }
+                password: { type: string }
+      responses:
+        "200":
+          description: Redeemed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, permission, pageId]
+                properties:
+                  token: { type: string }
+                  permission: { type: string, enum: [view, edit] }
+                  pageId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { description: Wrong link password. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+
+  /admin/settings:
+    get:
+      operationId: getAdminSettings
+      summary: Instance settings (org admin) — internal-login toggle and the effective attachment policy.
+      responses:
+        "200":
+          description: OK.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    patch:
+      operationId: updateAdminSettings
+      summary: >-
+        Update instance settings (org admin); send any subset, at least one.
+        Attachment policy (Decision 17): an admin value overrides the
+        env/Helm default until reset; `null` resets that field to the default.
+        Max size is capped at 100 MiB (uploads are buffered in memory).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                internalLoginDisabled: { type: boolean }
+                attachmentAllowlist:
+                  type: array
+                  nullable: true
+                  minItems: 1
+                  maxItems: 100
+                  items: { type: string, example: "image/png" }
+                attachmentMaxSizeBytes: { type: integer, format: int64, nullable: true, minimum: 1, maximum: 104857600 }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminSettings" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -419,7 +1275,48 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: The caller's role does not allow this action.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: The request conflicts with current state (the `error` message says how).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Gone:
+      description: The token/link was used, revoked or has expired.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Rate limited. `Retry-After` says how many seconds to wait.
+      headers:
+        Retry-After: { schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ExportFile:
+      description: >-
+        The exported file. `md`: text/markdown; `html`: text/html; zip for
+        multiple pages; `pdf`: print-optimised text/html served inline. Fetch
+        with the bearer token and use a blob URL (Decision 34).
+      content:
+        text/markdown: { schema: { type: string } }
+        text/html: { schema: { type: string } }
+        application/zip: { schema: { type: string, format: binary } }
   parameters:
+    ExportFormat:
+      name: format
+      in: query
+      required: true
+      schema: { type: string, enum: [md, html, pdf] }
     SpaceId:
       name: spaceId
       in: path
@@ -559,3 +1456,147 @@ components:
         uploaded_by_user_id: { type: string, format: uuid, nullable: true }
         uploaded_by_guest_id: { type: string, format: uuid, nullable: true }
         created_at: { type: string, format: date-time }
+    Invite:
+      type: object
+      required: [id, email, grants_org_admin, status, expires_at, redeemed_at, redeemed_by_user_id, revoked_at, created_by_user_id, created_by_display_name, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, nullable: true }
+        grants_org_admin: { type: boolean }
+        status: { type: string, enum: [pending, redeemed, revoked, expired] }
+        expires_at: { type: string, format: date-time, nullable: true }
+        redeemed_at: { type: string, format: date-time, nullable: true }
+        redeemed_by_user_id: { type: string, format: uuid, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        created_by_user_id: { type: string, format: uuid }
+        created_by_display_name: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    InviteCreated:
+      allOf:
+        - $ref: "#/components/schemas/Invite"
+        - type: object
+          required: [token]
+          properties:
+            token: { type: string, description: Bearer secret, shown once. Never logged by the server. }
+    User:
+      type: object
+      required: [id, email, display_name, auth_provider, is_org_admin, disabled, created_at, last_login_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        display_name: { type: string }
+        auth_provider: { type: string, enum: [internal, oidc] }
+        is_org_admin: { type: boolean }
+        disabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        last_login_at: { type: string, format: date-time, nullable: true }
+    SpaceMemberRow:
+      type: object
+      required: [id, space_id, user_id, group_id, role, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        space_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid, nullable: true }
+        group_id: { type: string, format: uuid, nullable: true }
+        role: { $ref: "#/components/schemas/SpaceRole" }
+        created_at: { type: string, format: date-time }
+    SpaceMember:
+      description: A member row with display fields. Exactly one of user_id / group_id is set.
+      allOf:
+        - $ref: "#/components/schemas/SpaceMemberRow"
+        - type: object
+          required: [user_email, user_display_name, group_name]
+          properties:
+            user_email: { type: string, nullable: true }
+            user_display_name: { type: string, nullable: true }
+            group_name: { type: string, nullable: true }
+    MemberCandidate:
+      type: object
+      required: [id, email, display_name]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        display_name: { type: string }
+    GroupCandidate:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+    PageTemplate:
+      type: object
+      required: [key, name, description, default_title, content]
+      properties:
+        key: { type: string, example: meeting-notes }
+        name: { type: string }
+        description: { type: string }
+        default_title: { type: string }
+        content:
+          description: ProseMirror/Tiptap JSON (StarterKit nodes only).
+          type: object
+          additionalProperties: true
+    PageRevision:
+      type: object
+      required: [id, page_id, title, author_user_id, author_guest_id, author_user_display_name, author_guest_display_name, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        page_id: { type: string, format: uuid }
+        title: { type: string, nullable: true }
+        author_user_id: { type: string, format: uuid, nullable: true }
+        author_guest_id: { type: string, format: uuid, nullable: true }
+        author_user_display_name: { type: string, nullable: true }
+        author_guest_display_name: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    PageRevisionDetail:
+      allOf:
+        - $ref: "#/components/schemas/PageRevision"
+        - type: object
+          required: [content]
+          properties:
+            content:
+              type: object
+              additionalProperties: true
+    ShareLink:
+      type: object
+      required: [id, page_id, token, permission, requires_password, expires_at, revoked_at, created_by_user_id, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        page_id: { type: string, format: uuid }
+        token: { type: string }
+        permission: { type: string, enum: [view, edit] }
+        requires_password: { type: boolean }
+        expires_at: { type: string, format: date-time, nullable: true }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        created_by_user_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    ShareLinkAccessLogEntry:
+      type: object
+      required: [id, share_link_id, accessed_at, ip_hash, user_agent, viewer_user_id, viewer_guest_id, viewer_user_display_name, viewer_guest_display_name]
+      properties:
+        id: { type: string, format: uuid }
+        share_link_id: { type: string, format: uuid }
+        accessed_at: { type: string, format: date-time }
+        ip_hash: { type: string }
+        user_agent: { type: string, nullable: true }
+        viewer_user_id: { type: string, format: uuid, nullable: true }
+        viewer_guest_id: { type: string, format: uuid, nullable: true }
+        viewer_user_display_name: { type: string, nullable: true }
+        viewer_guest_display_name: { type: string, nullable: true }
+    AdminSettings:
+      type: object
+      required:
+        - internal_login_disabled
+        - updated_at
+        - attachment_allowlist
+        - attachment_max_size_bytes
+        - attachment_policy_overridden
+        - attachment_default_allowlist
+        - attachment_default_max_size_bytes
+      properties:
+        internal_login_disabled: { type: boolean }
+        updated_at: { type: string, format: date-time }
+        attachment_allowlist: { type: array, items: { type: string }, description: The policy in force (admin override, else default). }
+        attachment_max_size_bytes: { type: integer, format: int64 }
+        attachment_policy_overridden: { type: boolean }
+        attachment_default_allowlist: { type: array, items: { type: string }, description: Deployment default (env / Helm). }
+        attachment_default_max_size_bytes: { type: integer, format: int64 }

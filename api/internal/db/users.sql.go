@@ -238,6 +238,130 @@ func (q *Queries) GetUserByOIDCIdentity(ctx context.Context, arg GetUserByOIDCId
 	return i, err
 }
 
+const listUsers = `-- name: ListUsers :many
+SELECT id, email, display_name, auth_provider, is_org_admin, disabled, created_at, last_login_at
+FROM users
+WHERE ($3::text IS NULL
+       OR email ILIKE '%' || $3::text || '%'
+       OR display_name ILIKE '%' || $3::text || '%')
+ORDER BY lower(display_name), email
+LIMIT $1 OFFSET $2
+`
+
+type ListUsersParams struct {
+	Limit  int32   `json:"limit"`
+	Offset int32   `json:"offset"`
+	Q      *string `json:"q"`
+}
+
+type ListUsersRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	Email        string             `json:"email"`
+	DisplayName  string             `json:"display_name"`
+	AuthProvider AuthProvider       `json:"auth_provider"`
+	IsOrgAdmin   bool               `json:"is_org_admin"`
+	Disabled     bool               `json:"disabled"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	LastLoginAt  pgtype.Timestamptz `json:"last_login_at"`
+}
+
+// Org-admin user directory. q (optional) filters by email/display name.
+func (q *Queries) ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error) {
+	rows, err := q.db.Query(ctx, listUsers, arg.Limit, arg.Offset, arg.Q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersRow
+	for rows.Next() {
+		var i ListUsersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.DisplayName,
+			&i.AuthProvider,
+			&i.IsOrgAdmin,
+			&i.Disabled,
+			&i.CreatedAt,
+			&i.LastLoginAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockOrgAdminChanges = `-- name: LockOrgAdminChanges :exec
+SELECT pg_advisory_xact_lock(hashtext('lde:org-admin-changes'))
+`
+
+// Transaction-scoped advisory lock serializing changes that could remove the
+// last enabled org admin.
+func (q *Queries) LockOrgAdminChanges(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockOrgAdminChanges)
+	return err
+}
+
+const lockUserRow = `-- name: LockUserRow :one
+SELECT id FROM users WHERE id = $1 FOR UPDATE
+`
+
+// Serializes concurrent admin changes (last-org-admin guard) on one user row.
+func (q *Queries) LockUserRow(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockUserRow, id)
+	var id_2 pgtype.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
+const searchMemberCandidates = `-- name: SearchMemberCandidates :many
+SELECT u.id, u.email, u.display_name
+FROM users u
+WHERE u.disabled = false
+  AND (u.email ILIKE '%' || $2::text || '%' OR u.display_name ILIKE '%' || $2::text || '%')
+  AND NOT EXISTS (SELECT 1 FROM space_members sm WHERE sm.space_id = $3 AND sm.user_id = u.id)
+ORDER BY lower(u.display_name), u.email
+LIMIT $1
+`
+
+type SearchMemberCandidatesParams struct {
+	Limit   int32       `json:"limit"`
+	Q       string      `json:"q"`
+	SpaceID pgtype.UUID `json:"space_id"`
+}
+
+type SearchMemberCandidatesRow struct {
+	ID          pgtype.UUID `json:"id"`
+	Email       string      `json:"email"`
+	DisplayName string      `json:"display_name"`
+}
+
+// Enabled users that are not yet a direct member of the space — the picker a
+// space admin uses to add a member (no org-admin rights needed).
+func (q *Queries) SearchMemberCandidates(ctx context.Context, arg SearchMemberCandidatesParams) ([]SearchMemberCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, searchMemberCandidates, arg.Limit, arg.Q, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchMemberCandidatesRow
+	for rows.Next() {
+		var i SearchMemberCandidatesRow
+		if err := rows.Scan(&i.ID, &i.Email, &i.DisplayName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setUserDisabled = `-- name: SetUserDisabled :exec
 UPDATE users SET disabled = $2, updated_at = now() WHERE id = $1
 `

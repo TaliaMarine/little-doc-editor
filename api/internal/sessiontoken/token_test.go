@@ -1,6 +1,7 @@
 package sessiontoken
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -73,5 +74,32 @@ func TestVerify_RejectsExpiredToken(t *testing.T) {
 func TestVerify_RejectsGarbageToken(t *testing.T) {
 	if _, err := Verify(testSecret, "not.a.jwt"); err == nil {
 		t.Error("expected verification of a non-JWT string to fail")
+	}
+}
+
+func TestVerifyRejectsReencodedSignature(t *testing.T) {
+	tok, err := IssueForUser("secret", uuid.New(), "N", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A 32-byte HMAC is 43 base64url characters with 2 spare bits in the last
+	// one, so neighbouring characters decode to the same bytes in lax decoders.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := tok[len(tok)-1]
+	idx := strings.IndexByte(alphabet, last)
+	accepted := 0
+	for i := 0; i < len(alphabet); i++ {
+		if i == idx {
+			continue
+		}
+		if _, err := Verify("secret", tok[:len(tok)-1]+string(alphabet[i])); err == nil {
+			accepted++
+		}
+	}
+	if accepted != 0 {
+		t.Fatalf("%d non-canonical spellings of the token verified; logout revocation could be bypassed", accepted)
+	}
+	if _, err := Verify("secret", tok); err != nil {
+		t.Fatalf("the canonical token must still verify: %v", err)
 	}
 }

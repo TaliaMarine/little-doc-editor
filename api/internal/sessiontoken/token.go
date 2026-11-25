@@ -40,6 +40,7 @@ func IssueForUser(secret string, userID uuid.UUID, displayName string, ttl time.
 			Subject:   userID.String(),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ID:        uuid.NewString(), // unique per token: logout revokes by token hash
 		},
 	}
 	return sign(secret, claims)
@@ -52,6 +53,7 @@ func IssueForGuest(secret string, guestIdentityID uuid.UUID, displayName string,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ID:        uuid.NewString(), // unique per token: logout revokes by token hash
 		},
 	}
 	return sign(secret, claims)
@@ -68,6 +70,7 @@ func IssueForShareGuest(secret string, guestIdentityID, shareLinkID uuid.UUID, d
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ID:        uuid.NewString(), // unique per token: logout revokes by token hash
 		},
 	}
 	return sign(secret, claims)
@@ -85,7 +88,11 @@ func Verify(secret, tokenString string) (Claims, error) {
 	var claims Claims
 	token, err := jwt.ParseWithClaims(tokenString, &claims, func(t *jwt.Token) (any, error) {
 		return []byte(secret), nil
-	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired())
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithExpirationRequired(),
+		// Reject non-canonical base64url spellings of an otherwise valid
+		// token: the revocation deny-list keys on a hash of the exact token
+		// string, so a re-encoded variant of a logged-out token must not verify.
+		jwt.WithStrictDecoding())
 	if err != nil || !token.Valid {
 		return Claims{}, ErrInvalidToken
 	}

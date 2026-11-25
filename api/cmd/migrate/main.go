@@ -20,6 +20,7 @@ import (
 func main() {
 	direction := flag.String("direction", "up", "up or down")
 	path := flag.String("path", "db/migrations", "path to migration files")
+	steps := flag.Int("steps", 0, "with -direction down: roll back only this many migrations (0 = ALL of them, which drops every table)")
 	flag.Parse()
 
 	dbURL := os.Getenv("DATABASE_URL")
@@ -38,7 +39,11 @@ func main() {
 	case "up":
 		err = m.Up()
 	case "down":
-		err = m.Down()
+		if *steps > 0 {
+			err = m.Steps(-*steps)
+		} else {
+			err = m.Down()
+		}
 	default:
 		slog.Error("direction must be up or down", "direction", *direction)
 		os.Exit(1)

@@ -29,6 +29,19 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.frontend.service.port }}
+          {{- $apiUrl := include "little-doc-editor.frontendApiBaseUrl" . }}
+          {{- $collabUrl := include "little-doc-editor.frontendCollabUrl" . }}
+          {{- if or $apiUrl $collabUrl }}
+          env:
+            {{- if $apiUrl }}
+            - name: API_BASE_URL
+              value: {{ $apiUrl | quote }}
+            {{- end }}
+            {{- if $collabUrl }}
+            - name: COLLAB_URL
+              value: {{ $collabUrl | quote }}
+            {{- end }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /

@@ -2,7 +2,7 @@
 
 import { type Client, type ClientMeta, formDataBodySerializer, type Options as Options2, type RequestResult, type TDataShape } from './client';
 import { client } from './client.gen';
-import type { CreatePageData, CreatePageErrors, CreatePageResponses, CreateSpaceData, CreateSpaceErrors, CreateSpaceResponses, DownloadAttachmentData, DownloadAttachmentErrors, DownloadAttachmentResponses, GetMeData, GetMeErrors, GetMeResponses, GetOidcStatusData, GetOidcStatusResponses, GetPageData, GetPageErrors, GetPageResponses, GetSpaceData, GetSpaceErrors, GetSpaceResponses, ListPageAttachmentsData, ListPageAttachmentsErrors, ListPageAttachmentsResponses, ListPagesBySpaceData, ListPagesBySpaceErrors, ListPagesBySpaceResponses, ListSpacesData, ListSpacesErrors, ListSpacesResponses, LoginData, LoginErrors, LoginResponses, UpdatePageContentData, UpdatePageContentErrors, UpdatePageContentResponses, UploadPageAttachmentData, UploadPageAttachmentErrors, UploadPageAttachmentResponses } from './types.gen';
+import type { AddSpaceGroupMemberData, AddSpaceGroupMemberErrors, AddSpaceGroupMemberResponses, AddSpaceMemberData, AddSpaceMemberErrors, AddSpaceMemberResponses, CreateInviteData, CreateInviteErrors, CreateInviteResponses, CreatePageData, CreatePageErrors, CreatePageResponses, CreateShareLinkData, CreateShareLinkErrors, CreateShareLinkResponses, CreateSpaceData, CreateSpaceErrors, CreateSpaceResponses, DeletePageData, DeletePageErrors, DeletePageResponses, DeleteSpaceData, DeleteSpaceErrors, DeleteSpaceResponses, DownloadAttachmentData, DownloadAttachmentErrors, DownloadAttachmentResponses, ExportPageData, ExportPageErrors, ExportPageResponses, ExportSpaceData, ExportSpaceErrors, ExportSpaceResponses, GetAdminSettingsData, GetAdminSettingsErrors, GetAdminSettingsResponses, GetMeData, GetMeErrors, GetMeResponses, GetOidcStatusData, GetOidcStatusResponses, GetPageData, GetPageErrors, GetPageResponses, GetPageRevisionData, GetPageRevisionErrors, GetPageRevisionResponses, GetSpaceData, GetSpaceErrors, GetSpaceResponses, ListInvitesData, ListInvitesErrors, ListInvitesResponses, ListPageAttachmentsData, ListPageAttachmentsErrors, ListPageAttachmentsResponses, ListPageRevisionsData, ListPageRevisionsErrors, ListPageRevisionsResponses, ListPagesBySpaceData, ListPagesBySpaceErrors, ListPagesBySpaceResponses, ListPageTemplatesData, ListPageTemplatesErrors, ListPageTemplatesResponses, ListShareLinkAccessLogData, ListShareLinkAccessLogErrors, ListShareLinkAccessLogResponses, ListShareLinksData, ListShareLinksErrors, ListShareLinksResponses, ListSpaceMembersData, ListSpaceMembersErrors, ListSpaceMembersResponses, ListSpacesData, ListSpacesErrors, ListSpacesResponses, ListUsersData, ListUsersErrors, ListUsersResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, MovePageData, MovePageErrors, MovePageResponses, RedeemInviteData, RedeemInviteErrors, RedeemInviteResponses, RedeemShareLinkData, RedeemShareLinkErrors, RedeemShareLinkResponses, RemoveSpaceGroupMemberData, RemoveSpaceGroupMemberErrors, RemoveSpaceGroupMemberResponses, RemoveSpaceMemberData, RemoveSpaceMemberErrors, RemoveSpaceMemberResponses, ResolveInviteData, ResolveInviteErrors, ResolveInviteResponses, ResolveShareLinkData, ResolveShareLinkErrors, ResolveShareLinkResponses, RestorePageRevisionData, RestorePageRevisionErrors, RestorePageRevisionResponses, RevokeInviteData, RevokeInviteErrors, RevokeInviteResponses, RevokeShareLinkData, RevokeShareLinkErrors, RevokeShareLinkResponses, SearchGroupCandidatesData, SearchGroupCandidatesErrors, SearchGroupCandidatesResponses, SearchMemberCandidatesData, SearchMemberCandidatesErrors, SearchMemberCandidatesResponses, SearchSpaceData, SearchSpaceErrors, SearchSpaceResponses, SetPageLockedData, SetPageLockedErrors, SetPageLockedResponses, SetUserDisabledData, SetUserDisabledErrors, SetUserDisabledResponses, UpdateAdminSettingsData, UpdateAdminSettingsErrors, UpdateAdminSettingsResponses, UpdatePageContentData, UpdatePageContentErrors, UpdatePageContentResponses, UpdateSpaceData, UpdateSpaceErrors, UpdateSpaceGroupMemberData, UpdateSpaceGroupMemberErrors, UpdateSpaceGroupMemberResponses, UpdateSpaceMemberData, UpdateSpaceMemberErrors, UpdateSpaceMemberResponses, UpdateSpaceResponses, UploadPageAttachmentData, UploadPageAttachmentErrors, UploadPageAttachmentResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -67,12 +67,34 @@ export const createSpace = <ThrowOnError extends boolean = false>(options: Optio
 });
 
 /**
+ * Delete a space and everything in it (pages, revisions, attachments and their stored files, share links). Space owner only (org admins pass). Irreversible.
+ */
+export const deleteSpace = <ThrowOnError extends boolean = false>(options: Options<DeleteSpaceData, ThrowOnError>): RequestResult<DeleteSpaceResponses, DeleteSpaceErrors, ThrowOnError> => (options.client ?? client).delete<DeleteSpaceResponses, DeleteSpaceErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}',
+    ...options
+});
+
+/**
  * Get a space by ID. Requires viewer+ space role.
  */
 export const getSpace = <ThrowOnError extends boolean = false>(options: Options<GetSpaceData, ThrowOnError>): RequestResult<GetSpaceResponses, GetSpaceErrors, ThrowOnError> => (options.client ?? client).get<GetSpaceResponses, GetSpaceErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
     url: '/spaces/{spaceId}',
     ...options
+});
+
+/**
+ * Rename a space or change its icon / history policy (Decision 9). Space owner/admin only (Decision 24). An absent field is unchanged; `null` clears the icon or removes a history limit (no limit on that axis).
+ */
+export const updateSpace = <ThrowOnError extends boolean = false>(options: Options<UpdateSpaceData, ThrowOnError>): RequestResult<UpdateSpaceResponses, UpdateSpaceErrors, ThrowOnError> => (options.client ?? client).patch<UpdateSpaceResponses, UpdateSpaceErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -98,6 +120,15 @@ export const createPage = <ThrowOnError extends boolean = false>(options: Option
 });
 
 /**
+ * Delete a page together with its descendants, attachments (rows and stored files), revisions and share links (Decision 24: editors delete). Editor+ space role, members only — share-link guests are refused even with an edit link. 403 if the page or any subpage is locked (unlock first). Irreversible.
+ */
+export const deletePage = <ThrowOnError extends boolean = false>(options: Options<DeletePageData, ThrowOnError>): RequestResult<DeletePageResponses, DeletePageErrors, ThrowOnError> => (options.client ?? client).delete<DeletePageResponses, DeletePageErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}',
+    ...options
+});
+
+/**
  * Get a page, including its content. Requires viewer+ space role, OR a valid share-link guest session scoped to this page or an ancestor of it (SPEC.md Decision 21) — see authz.RequirePageAccess.
  */
 export const getPage = <ThrowOnError extends boolean = false>(options: Options<GetPageData, ThrowOnError>): RequestResult<GetPageResponses, GetPageErrors, ThrowOnError> => (options.client ?? client).get<GetPageResponses, GetPageErrors, ThrowOnError>({
@@ -107,7 +138,8 @@ export const getPage = <ThrowOnError extends boolean = false>(options: Options<G
 });
 
 /**
- * Replace a page's title/content. Requires editor+ space role, OR a valid share-link guest session with edit permission scoped to this page or an ancestor of it (SPEC.md Decision 21) — see authz.RequirePageAccess. Rejected if the page is locked.
+ * Update a page's title and/or content (at least one). Requires editor+ space role, OR a valid share-link guest session with edit permission scoped to this page or an ancestor of it (SPEC.md Decision 21) — see authz.RequirePageAccess. Rejected if the page is locked.
+ * **Renames must omit `content`**: a title-only request never touches page content, so it cannot clobber live collaborative state (collab owns content while a document is open). When `content` is present it replaces the stored content, re-indexes search and may record a revision (SPEC.md §6.7; same-author saves within the debounce window do not create one). An omitted `title` keeps the current title.
  */
 export const updatePageContent = <ThrowOnError extends boolean = false>(options: Options<UpdatePageContentData, ThrowOnError>): RequestResult<UpdatePageContentResponses, UpdatePageContentErrors, ThrowOnError> => (options.client ?? client).put<UpdatePageContentResponses, UpdatePageContentErrors, ThrowOnError>({
     security: [{ scheme: 'bearer', type: 'http' }],
@@ -149,4 +181,348 @@ export const downloadAttachment = <ThrowOnError extends boolean = false>(options
     security: [{ scheme: 'bearer', type: 'http' }],
     url: '/attachments/{attachmentId}',
     ...options
+});
+
+/**
+ * Revoke the presented session token server-side. Takes effect on the very next request (api and collab). Idempotent for a valid token; a token that is already revoked gets 401 like any other request.
+ */
+export const logout = <ThrowOnError extends boolean = false>(options?: Options<LogoutData, ThrowOnError>): RequestResult<LogoutResponses, LogoutErrors, ThrowOnError> => (options?.client ?? client).post<LogoutResponses, LogoutErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/auth/logout',
+    ...options
+});
+
+/**
+ * List invites, newest first (org admin). Never includes tokens.
+ */
+export const listInvites = <ThrowOnError extends boolean = false>(options?: Options<ListInvitesData, ThrowOnError>): RequestResult<ListInvitesResponses, ListInvitesErrors, ThrowOnError> => (options?.client ?? client).get<ListInvitesResponses, ListInvitesErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/invites',
+    ...options
+});
+
+/**
+ * Create an invite (org admin; Decision 11/15, no SMTP). The response carries the bearer `token` exactly once — only its hash is stored, so it cannot be shown again. Build the link as `<origin>/invite/<token>` and share it out-of-band. Default expiry 7 days, maximum 90. 409 if internal login is disabled instance-wide, or the email already has an account.
+ */
+export const createInvite = <ThrowOnError extends boolean = false>(options: Options<CreateInviteData, ThrowOnError>): RequestResult<CreateInviteResponses, CreateInviteErrors, ThrowOnError> => (options.client ?? client).post<CreateInviteResponses, CreateInviteErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/invites',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Revoke a pending invite (org admin). 409 if it was already redeemed or revoked.
+ */
+export const revokeInvite = <ThrowOnError extends boolean = false>(options: Options<RevokeInviteData, ThrowOnError>): RequestResult<RevokeInviteResponses, RevokeInviteErrors, ThrowOnError> => (options.client ?? client).delete<RevokeInviteResponses, RevokeInviteErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/invites/{inviteId}',
+    ...options
+});
+
+/**
+ * Public. Check an invite token before showing the sign-up form. 404 unknown token; 410 already used, revoked or expired. Rate limited.
+ */
+export const resolveInvite = <ThrowOnError extends boolean = false>(options: Options<ResolveInviteData, ThrowOnError>): RequestResult<ResolveInviteResponses, ResolveInviteErrors, ThrowOnError> => (options.client ?? client).get<ResolveInviteResponses, ResolveInviteErrors, ThrowOnError>({ url: '/invites/{token}', ...options });
+
+/**
+ * Public. Create the internal account (argon2id) and sign in. Password 10 to 128 characters. `email` is required only when the invite is not bound to one (a bound invite always uses its own address). Single use: concurrent redemptions yield exactly one account. 409 if the email already has an account (the invite is not consumed). Rate limited.
+ */
+export const redeemInvite = <ThrowOnError extends boolean = false>(options: Options<RedeemInviteData, ThrowOnError>): RequestResult<RedeemInviteResponses, RedeemInviteErrors, ThrowOnError> => (options.client ?? client).post<RedeemInviteResponses, RedeemInviteErrors, ThrowOnError>({
+    url: '/invites/{token}/redeem',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * User directory (org admin). `q` filters by email or display name.
+ */
+export const listUsers = <ThrowOnError extends boolean = false>(options?: Options<ListUsersData, ThrowOnError>): RequestResult<ListUsersResponses, ListUsersErrors, ThrowOnError> => (options?.client ?? client).get<ListUsersResponses, ListUsersErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/users',
+    ...options
+});
+
+/**
+ * Disable or re-enable an account (org admin). Disabling takes effect on the next request. 409 when disabling yourself or the last enabled org admin.
+ */
+export const setUserDisabled = <ThrowOnError extends boolean = false>(options: Options<SetUserDisabledData, ThrowOnError>): RequestResult<SetUserDisabledResponses, SetUserDisabledErrors, ThrowOnError> => (options.client ?? client).patch<SetUserDisabledResponses, SetUserDisabledErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/users/{userId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Members of a space — users and groups. Requires viewer+ space role.
+ */
+export const listSpaceMembers = <ThrowOnError extends boolean = false>(options: Options<ListSpaceMembersData, ThrowOnError>): RequestResult<ListSpaceMembersResponses, ListSpaceMembersErrors, ThrowOnError> => (options.client ?? client).get<ListSpaceMembersResponses, ListSpaceMembersErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/members',
+    ...options
+});
+
+/**
+ * Add a user to the space (or change their role if already a member). Space owner/admin only (granting or changing the `owner` role needs an owner; otherwise 403). 409 if it would leave the space without a direct (user) owner.
+ */
+export const addSpaceMember = <ThrowOnError extends boolean = false>(options: Options<AddSpaceMemberData, ThrowOnError>): RequestResult<AddSpaceMemberResponses, AddSpaceMemberErrors, ThrowOnError> => (options.client ?? client).post<AddSpaceMemberResponses, AddSpaceMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/members',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Remove a member (idempotent). Space owner/admin. 409 if it would remove the last owner.
+ */
+export const removeSpaceMember = <ThrowOnError extends boolean = false>(options: Options<RemoveSpaceMemberData, ThrowOnError>): RequestResult<RemoveSpaceMemberResponses, RemoveSpaceMemberErrors, ThrowOnError> => (options.client ?? client).delete<RemoveSpaceMemberResponses, RemoveSpaceMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/members/{userId}',
+    ...options
+});
+
+/**
+ * Change a member's role. Space owner/admin (anything involving the `owner` role needs an owner, else 403). 409 if it would remove the last direct owner.
+ */
+export const updateSpaceMember = <ThrowOnError extends boolean = false>(options: Options<UpdateSpaceMemberData, ThrowOnError>): RequestResult<UpdateSpaceMemberResponses, UpdateSpaceMemberErrors, ThrowOnError> => (options.client ?? client).patch<UpdateSpaceMemberResponses, UpdateSpaceMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/members/{userId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Picker for "add member": enabled users who are not yet direct members, matching `q` (min 2 characters) on email/display name. Space owner/admin — no org-admin rights needed. At most 20 results.
+ */
+export const searchMemberCandidates = <ThrowOnError extends boolean = false>(options: Options<SearchMemberCandidatesData, ThrowOnError>): RequestResult<SearchMemberCandidatesResponses, SearchMemberCandidatesErrors, ThrowOnError> => (options.client ?? client).get<SearchMemberCandidatesResponses, SearchMemberCandidatesErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/member-candidates',
+    ...options
+});
+
+/**
+ * Grant a group a role in the space (or change it). Groups come from the IdP groups claim and are created at OIDC login. A user's effective role is the highest of their direct role, any of their groups' roles, and the instance default. Space owner/admin. 409 on last-owner loss.
+ */
+export const addSpaceGroupMember = <ThrowOnError extends boolean = false>(options: Options<AddSpaceGroupMemberData, ThrowOnError>): RequestResult<AddSpaceGroupMemberResponses, AddSpaceGroupMemberErrors, ThrowOnError> => (options.client ?? client).post<AddSpaceGroupMemberResponses, AddSpaceGroupMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/group-members',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Remove a group from the space (idempotent). Space owner/admin. 409 on last-owner loss.
+ */
+export const removeSpaceGroupMember = <ThrowOnError extends boolean = false>(options: Options<RemoveSpaceGroupMemberData, ThrowOnError>): RequestResult<RemoveSpaceGroupMemberResponses, RemoveSpaceGroupMemberErrors, ThrowOnError> => (options.client ?? client).delete<RemoveSpaceGroupMemberResponses, RemoveSpaceGroupMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/group-members/{groupId}',
+    ...options
+});
+
+/**
+ * Change a group's role in the space. Space owner/admin. 409 on last-owner loss.
+ */
+export const updateSpaceGroupMember = <ThrowOnError extends boolean = false>(options: Options<UpdateSpaceGroupMemberData, ThrowOnError>): RequestResult<UpdateSpaceGroupMemberResponses, UpdateSpaceGroupMemberErrors, ThrowOnError> => (options.client ?? client).patch<UpdateSpaceGroupMemberResponses, UpdateSpaceGroupMemberErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/group-members/{groupId}',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Known groups for the "add group" picker (optional `q` name filter, max 50). Space owner/admin.
+ */
+export const searchGroupCandidates = <ThrowOnError extends boolean = false>(options: Options<SearchGroupCandidatesData, ThrowOnError>): RequestResult<SearchGroupCandidatesResponses, SearchGroupCandidatesErrors, ThrowOnError> => (options.client ?? client).get<SearchGroupCandidatesResponses, SearchGroupCandidatesErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/group-candidates',
+    ...options
+});
+
+/**
+ * Full-text search over a space's pages (Postgres FTS). Requires viewer+ space role. Max 25 hits.
+ */
+export const searchSpace = <ThrowOnError extends boolean = false>(options: Options<SearchSpaceData, ThrowOnError>): RequestResult<SearchSpaceResponses, SearchSpaceErrors, ThrowOnError> => (options.client ?? client).get<SearchSpaceResponses, SearchSpaceErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/search',
+    ...options
+});
+
+/**
+ * Export every page of a space. `md` / `html` return a zip whose folders mirror the page tree; `pdf` returns one print-optimised HTML document (page breaks, @page margins, images embedded) for the frontend to load into an iframe and print — the api does not render PDFs. Requires viewer+ space role (members only).
+ */
+export const exportSpace = <ThrowOnError extends boolean = false>(options: Options<ExportSpaceData, ThrowOnError>): RequestResult<ExportSpaceResponses, ExportSpaceErrors, ThrowOnError> => (options.client ?? client).get<ExportSpaceResponses, ExportSpaceErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/spaces/{spaceId}/export',
+    ...options
+});
+
+/**
+ * The built-in page templates (Decision 22). Names/descriptions are English; key them into the i18n catalog by `key`. Create a page from one with createPage's `templateKey`.
+ */
+export const listPageTemplates = <ThrowOnError extends boolean = false>(options?: Options<ListPageTemplatesData, ThrowOnError>): RequestResult<ListPageTemplatesResponses, ListPageTemplatesErrors, ThrowOnError> => (options?.client ?? client).get<ListPageTemplatesResponses, ListPageTemplatesErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/page-templates',
+    ...options
+});
+
+/**
+ * Reparent and/or reorder a page. Requires editor+ space role (members only — share-link guests are refused even with an edit link). `parentId` must be a page in the same space (else 400), may not be the page itself or a descendant; omit/null for a root page. The server persists `position` as given — compute the fractional midpoint between the two flanking siblings client-side.
+ */
+export const movePage = <ThrowOnError extends boolean = false>(options: Options<MovePageData, ThrowOnError>): RequestResult<MovePageResponses, MovePageErrors, ThrowOnError> => (options.client ?? client).patch<MovePageResponses, MovePageErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}/move',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Lock or unlock a page (read-only for everyone while locked, including attachment uploads and revision restore). Editor+ space role, members only.
+ */
+export const setPageLocked = <ThrowOnError extends boolean = false>(options: Options<SetPageLockedData, ThrowOnError>): RequestResult<SetPageLockedResponses, SetPageLockedErrors, ThrowOnError> => (options.client ?? client).patch<SetPageLockedResponses, SetPageLockedErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}/lock',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Export a page (optionally with its descendants). Single page: the file itself (`md` / `html`). With descendants: a zip mirroring the tree. `pdf`: one print-optimised HTML document for the frontend to print (see exportSpace). Inline images are embedded in html/pdf; Markdown references them as `attachment:<id>`. Requires view access (viewer+ role, or a share-link guest whose link covers the page).
+ */
+export const exportPage = <ThrowOnError extends boolean = false>(options: Options<ExportPageData, ThrowOnError>): RequestResult<ExportPageResponses, ExportPageErrors, ThrowOnError> => (options.client ?? client).get<ExportPageResponses, ExportPageErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}/export',
+    ...options
+});
+
+/**
+ * Revision history, newest first, without content (SPEC.md §6.7). Viewer+ space role (Decision 30) — members only; share-link guests get 403.
+ */
+export const listPageRevisions = <ThrowOnError extends boolean = false>(options: Options<ListPageRevisionsData, ThrowOnError>): RequestResult<ListPageRevisionsResponses, ListPageRevisionsErrors, ThrowOnError> => (options.client ?? client).get<ListPageRevisionsResponses, ListPageRevisionsErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}/revisions',
+    ...options
+});
+
+/**
+ * One revision including its content. Viewer+ space role, members only.
+ */
+export const getPageRevision = <ThrowOnError extends boolean = false>(options: Options<GetPageRevisionData, ThrowOnError>): RequestResult<GetPageRevisionResponses, GetPageRevisionErrors, ThrowOnError> => (options.client ?? client).get<GetPageRevisionResponses, GetPageRevisionErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}/revisions/{revisionId}',
+    ...options
+});
+
+/**
+ * Make a revision the page's current content (Decision 30: editor+, members only; 403 if the page is locked). The replaced state and the restore are both recorded as revisions, so a restore is undoable; the search index is refreshed. Returns the updated page.
+ */
+export const restorePageRevision = <ThrowOnError extends boolean = false>(options: Options<RestorePageRevisionData, ThrowOnError>): RequestResult<RestorePageRevisionResponses, RestorePageRevisionErrors, ThrowOnError> => (options.client ?? client).post<RestorePageRevisionResponses, RestorePageRevisionErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}/revisions/{revisionId}/restore',
+    ...options
+});
+
+/**
+ * Share links of a page (including revoked/expired). Editor+ space role, members only.
+ */
+export const listShareLinks = <ThrowOnError extends boolean = false>(options: Options<ListShareLinksData, ThrowOnError>): RequestResult<ListShareLinksResponses, ListShareLinksErrors, ThrowOnError> => (options.client ?? client).get<ListShareLinksResponses, ListShareLinksErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}/share-links',
+    ...options
+});
+
+/**
+ * Create a share link for the page and its descendants (Decision 21). Editor+ space role, members only. The response includes the opaque `token`; the public link is `<origin>/share/<token>`.
+ */
+export const createShareLink = <ThrowOnError extends boolean = false>(options: Options<CreateShareLinkData, ThrowOnError>): RequestResult<CreateShareLinkResponses, CreateShareLinkErrors, ThrowOnError> => (options.client ?? client).post<CreateShareLinkResponses, CreateShareLinkErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/pages/{pageId}/share-links',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Revoke a share link; guest sessions issued from it stop working immediately. Editor+ space role.
+ */
+export const revokeShareLink = <ThrowOnError extends boolean = false>(options: Options<RevokeShareLinkData, ThrowOnError>): RequestResult<RevokeShareLinkResponses, RevokeShareLinkErrors, ThrowOnError> => (options.client ?? client).delete<RevokeShareLinkResponses, RevokeShareLinkErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/share-links/{shareLinkId}',
+    ...options
+});
+
+/**
+ * Who redeemed the link, newest first (Decision 16: visible to editors, space admins/owners; not to viewers or guests). IPs are keyed hashes. `viewer_user_id` is set when the redeemer was signed in (the SPA sends its bearer token to the redeem call); the guest identity is always set. Only redemption is logged, not each subsequent request.
+ */
+export const listShareLinkAccessLog = <ThrowOnError extends boolean = false>(options: Options<ListShareLinkAccessLogData, ThrowOnError>): RequestResult<ListShareLinkAccessLogResponses, ListShareLinkAccessLogErrors, ThrowOnError> => (options.client ?? client).get<ListShareLinkAccessLogResponses, ListShareLinkAccessLogErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/share-links/{shareLinkId}/access-log',
+    ...options
+});
+
+/**
+ * Public. Look up a share link before redeeming it (title is only shown for password-less links). 404 unknown; 410 revoked/expired. Rate limited.
+ */
+export const resolveShareLink = <ThrowOnError extends boolean = false>(options: Options<ResolveShareLinkData, ThrowOnError>): RequestResult<ResolveShareLinkResponses, ResolveShareLinkErrors, ThrowOnError> => (options.client ?? client).get<ResolveShareLinkResponses, ResolveShareLinkErrors, ThrowOnError>({ url: '/share/{token}', ...options });
+
+/**
+ * Public. Exchange a link (plus password and the mandatory display name, Decision 6) for a guest session token. If the caller sends a valid bearer token the access log also records them as the viewer. Rate limited.
+ */
+export const redeemShareLink = <ThrowOnError extends boolean = false>(options: Options<RedeemShareLinkData, ThrowOnError>): RequestResult<RedeemShareLinkResponses, RedeemShareLinkErrors, ThrowOnError> => (options.client ?? client).post<RedeemShareLinkResponses, RedeemShareLinkErrors, ThrowOnError>({
+    url: '/share/{token}/redeem',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Instance settings (org admin) — internal-login toggle and the effective attachment policy.
+ */
+export const getAdminSettings = <ThrowOnError extends boolean = false>(options?: Options<GetAdminSettingsData, ThrowOnError>): RequestResult<GetAdminSettingsResponses, GetAdminSettingsErrors, ThrowOnError> => (options?.client ?? client).get<GetAdminSettingsResponses, GetAdminSettingsErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/admin/settings',
+    ...options
+});
+
+/**
+ * Update instance settings (org admin); send any subset, at least one. Attachment policy (Decision 17): an admin value overrides the env/Helm default until reset; `null` resets that field to the default. Max size is capped at 100 MiB (uploads are buffered in memory).
+ */
+export const updateAdminSettings = <ThrowOnError extends boolean = false>(options: Options<UpdateAdminSettingsData, ThrowOnError>): RequestResult<UpdateAdminSettingsResponses, UpdateAdminSettingsErrors, ThrowOnError> => (options.client ?? client).patch<UpdateAdminSettingsResponses, UpdateAdminSettingsErrors, ThrowOnError>({
+    security: [{ scheme: 'bearer', type: 'http' }],
+    url: '/admin/settings',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });

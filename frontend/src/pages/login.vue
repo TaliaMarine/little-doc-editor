@@ -47,6 +47,8 @@
   import { useRoute, useRouter } from 'vue-router'
   import { getOidcStatus } from '@/api/generated'
   import { useAuthStore } from '@/stores/auth'
+  import { RateLimitedError, rateLimitMessage } from '@/utils/rateLimit'
+  import { safeRedirect } from '@/utils/redirect'
 
   const { t } = useI18n()
   const router = useRouter()
@@ -58,18 +60,32 @@
   const submitting = ref(false)
   const errorMessage = ref('')
 
+  // `reason` comes from the api's SSO error redirect (Decision 39); anything
+  // unknown falls back to the generic message.
+  function ssoErrorMessage (reason: unknown): string {
+    switch (reason) {
+      case 'email_taken': { return t('login.ssoEmailTaken') }
+      case 'provider_error': { return t('login.ssoProviderError') }
+      default: { return t('login.ssoFailed') }
+    }
+  }
+
   const oidcEnabled = ref(false)
   onMounted(async () => {
-    const { data } = await getOidcStatus()
+    // Without a reachable status endpoint the SSO button simply stays hidden.
+    const { data } = await getOidcStatus().catch(() => ({ data: undefined }))
     oidcEnabled.value = data?.enabled ?? false
     if (route.query.sso_error) {
-      errorMessage.value = t('login.ssoFailed')
+      // The SSO round trip failed: a stale marker must not authorise a later
+      // forged /auth/callback.
+      sessionStorage.removeItem('little-doc-editor.post-login')
+      errorMessage.value = ssoErrorMessage(route.query.reason)
     }
   })
 
   function ssoLogin () {
     // Remember where to go after the round trip; the callback page reads it.
-    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
+    const redirect = safeRedirect(route.query.redirect)
     sessionStorage.setItem('little-doc-editor.post-login', redirect)
     window.location.assign('/api/v1/auth/oidc/login')
   }
@@ -79,10 +95,11 @@
     errorMessage.value = ''
     try {
       await authStore.login(email.value, password.value)
-      const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
-      router.push(redirect)
+      router.push(safeRedirect(route.query.redirect))
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : t('login.error')
+      errorMessage.value = error instanceof RateLimitedError
+        ? rateLimitMessage(t, error.retryAfter)
+        : (error instanceof Error ? error.message : t('login.error'))
     } finally {
       submitting.value = false
     }

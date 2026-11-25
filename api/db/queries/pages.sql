@@ -67,30 +67,122 @@ WHERE space_id = $1
 ORDER BY ts_rank(search_vector, websearch_to_tsquery('english', $2)) DESC
 LIMIT $3;
 
--- name: CreatePageRevision :one
-INSERT INTO page_revisions (page_id, content, author_user_id, author_guest_id)
-VALUES ($1, $2, $3, $4)
+-- name: DeletePage :exec
+DELETE FROM pages WHERE id = $1;
+
+-- name: SetPageLocked :one
+UPDATE pages SET locked = $2, updated_at = now() WHERE id = $1
 RETURNING *;
 
+-- name: GetPageByIDForUpdate :one
+-- Row-locks the page inside a transaction (writers lock the page row first).
+SELECT * FROM pages WHERE id = $1 FOR UPDATE;
+
+-- name: CountLockedPagesInSubtree :one
+-- Locked pages in a page's subtree (including the page itself).
+WITH RECURSIVE tree AS (
+    SELECT root.id AS id FROM pages root WHERE root.id = $1
+    UNION
+    SELECT child.id AS id FROM pages child JOIN tree t ON child.parent_id = t.id
+)
+SELECT count(*) FROM pages p JOIN tree ON p.id = tree.id WHERE p.locked;
+
+-- name: ListAttachmentKeysForPageTree :many
+-- S3 keys of every attachment on a page and its descendants, collected before
+-- a delete cascades the rows away so the blobs can be removed too.
+WITH RECURSIVE tree AS (
+    SELECT root.id AS id FROM pages root WHERE root.id = $1
+    UNION
+    SELECT child.id AS id FROM pages child JOIN tree t ON child.parent_id = t.id
+)
+SELECT a.s3_key FROM attachments a JOIN tree ON a.page_id = tree.id;
+
+-- name: ListAttachmentKeysForSpace :many
+SELECT a.s3_key FROM attachments a JOIN pages p ON p.id = a.page_id WHERE p.space_id = $1;
+
+-- name: ListPageSubtree :many
+-- A page and all its descendants with content, for export. Depth-first
+-- ordering is reconstructed in Go from parent_id/position.
+WITH RECURSIVE tree AS (
+    SELECT root.id AS id FROM pages root WHERE root.id = $1
+    UNION
+    SELECT child.id AS id FROM pages child JOIN tree t ON child.parent_id = t.id
+)
+SELECT p.id, p.space_id, p.parent_id, p.position, p.title, p.content, p.created_at
+FROM pages p JOIN tree ON p.id = tree.id
+ORDER BY p.position, p.created_at, p.id
+LIMIT 2001; -- one past exportapi's page cap, so an oversized export is refused without loading it all
+
+-- name: ListSpacePagesForExport :many
+SELECT id, space_id, parent_id, position, title, content, created_at
+FROM pages WHERE space_id = $1
+ORDER BY position, created_at, id
+LIMIT 2001; -- one past exportapi's page cap
+
+-- name: CreatePageRevision :one
+-- clock_timestamp(), not the column default now(): several revisions can be
+-- written in one transaction (save + preserved state, restore) and must keep
+-- their order, but now() is constant within a transaction.
+INSERT INTO page_revisions (page_id, content, title, author_user_id, author_guest_id, created_at)
+VALUES ($1, $2, $3, $4, $5, clock_timestamp())
+RETURNING *;
+
+-- name: GetLatestPageRevision :one
+SELECT * FROM page_revisions WHERE page_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1;
+
 -- name: ListPageRevisions :many
-SELECT * FROM page_revisions WHERE page_id = $1 ORDER BY created_at DESC;
+-- History list: metadata only (no content, which can be large).
+SELECT r.id, r.page_id, r.title, r.author_user_id, r.author_guest_id, r.created_at,
+       u.display_name AS author_user_display_name,
+       g.display_name AS author_guest_display_name
+FROM page_revisions r
+LEFT JOIN users u ON u.id = r.author_user_id
+LEFT JOIN guest_identities g ON g.id = r.author_guest_id
+WHERE r.page_id = $1
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT $2 OFFSET $3;
 
--- name: PruneRevisionsBeyondCount :many
--- Deletes revisions beyond the space's history_max_count, keeping the most
--- recent N. Returns deleted rows so the caller can log deleted_count and the
--- oldest/newest deleted_at only when this actually deletes something
--- (Decision 9) — a zero-row result must not produce a history_cleanup_logs entry.
-DELETE FROM page_revisions AS outer_pr
-WHERE outer_pr.page_id = $1
-  AND outer_pr.id IN (
-    SELECT inner_pr.id FROM page_revisions AS inner_pr
-    WHERE inner_pr.page_id = $1
-    ORDER BY inner_pr.created_at DESC
-    OFFSET $2
+-- name: GetPageRevision :one
+SELECT r.id, r.page_id, r.content, r.title, r.author_user_id, r.author_guest_id, r.created_at,
+       u.display_name AS author_user_display_name,
+       g.display_name AS author_guest_display_name
+FROM page_revisions r
+LEFT JOIN users u ON u.id = r.author_user_id
+LEFT JOIN guest_identities g ON g.id = r.author_guest_id
+WHERE r.id = $1 AND r.page_id = $2;
+
+-- name: PruneSpaceRevisions :many
+-- One space's lifecycle policy (Decision 9): a revision is deleted when it is
+-- beyond the newest max_count of its page OR older than max_age_days —
+-- whichever threshold is hit first. NULL means no limit on that dimension.
+-- The newest revision of each page is never age-pruned, so an idle page keeps
+-- its last known state (and a later save doesn't need a synthetic baseline).
+-- Returns the deleted rows so the caller logs only when something was
+-- actually deleted.
+WITH ranked AS (
+    SELECT r.id, r.created_at,
+           row_number() OVER (PARTITION BY r.page_id ORDER BY r.created_at DESC, r.id DESC) AS rn
+    FROM page_revisions r
+    JOIN pages p ON p.id = r.page_id
+    WHERE p.space_id = $1
+)
+DELETE FROM page_revisions pr
+USING ranked
+WHERE pr.id = ranked.id
+  AND (
+    (sqlc.narg('max_count')::integer IS NOT NULL AND ranked.rn > sqlc.narg('max_count')::integer)
+    OR (sqlc.narg('max_age_days')::integer IS NOT NULL AND ranked.rn > 1
+        AND ranked.created_at < now() - make_interval(days => sqlc.narg('max_age_days')::integer))
   )
-RETURNING outer_pr.id, outer_pr.created_at;
+RETURNING pr.id, pr.created_at;
 
--- name: PruneRevisionsBeyondAge :many
-DELETE FROM page_revisions
-WHERE page_id = $1 AND created_at < $2
-RETURNING id, created_at;
+-- name: CreateHistoryCleanupLog :exec
+INSERT INTO history_cleanup_logs (space_id, deleted_count, oldest_deleted_at, newest_deleted_at)
+VALUES ($1, $2, $3, $4);
+
+-- name: UpdatePageTitle :one
+-- Title-only rename: never touches content, so it can't clobber live
+-- collaborative state (collab owns content while a doc is open).
+UPDATE pages SET title = $2, updated_at = now()
+WHERE id = $1
+RETURNING *;

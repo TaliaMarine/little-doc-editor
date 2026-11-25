@@ -1,6 +1,6 @@
 # api
 
-Go REST API service for little-doc-editor. See the repo-root [SPEC.md](../SPEC.md) for the full spec, [README.md](../README.md) for the overall architecture, and [DEVELOPER.md](../DEVELOPER.md) for the full local setup (docker-compose, all three services together).
+Go REST API service for little-doc-editor. See the repo-root [SPEC.md](../SPEC.md) for the full spec, [ARCHITECTURE.md](../ARCHITECTURE.md) for the overall architecture, and [DEVELOPER.md](../DEVELOPER.md) for the full local setup (docker-compose, all three services together).
 
 ## Stack
 
@@ -20,7 +20,17 @@ chi router, pgx/v5 (pgxpool), sqlc for type-safe queries, golang-migrate (via `c
 
 All of the above is verified against real Postgres + MinIO in `internal/integrationtest`, not just unit-tested with mocks.
 
-Not started: export, the Tiptap editor's frontend integration, per-space history-lifecycle cleanup job, group-based (as opposed to direct user) space membership.
+- **Accounts** (`internal/accountsapi`): admin-issued invites (hashed bearer tokens, single use, argon2id account on redemption), the org-admin user directory and disable/enable (Decisions 11, 15, 41). Space member management with a last-owner guard, including **group** principals fed by the IdP groups claim (Decision 40).
+- **Page/space CRUD**: page delete, lock/unlock, space update/delete; built-in page templates (`/page-templates`, `createPage` with `templateKey`); revisions with a debounce rule, browse/restore, and the in-process cleanup job (`HISTORY_CLEANUP_SCHEDULE`) (Decisions 42, 43); server-side Markdown/HTML/print-HTML export (`internal/export`, `internal/exportapi`, Decision 44); the admin attachment policy in `instance_settings` (Decision 45).
+- **Collab notification** (`internal/pagesync`): after committing a revision restore or a content-changing `PUT /pages/{id}/content`, the api publishes the page id (UUID string, nothing else) on the Redis channel `lde:page-content-replaced` (`pagesync.Channel`; collab's `PAGE_CONTENT_CHANNEL`) so collab merges the change into a live room immediately. Uses the `REDIS_*` settings (needs `PUBLISH` under ACLs); best-effort — a failure is logged as a warning and never fails the request (collab then picks the change up at its next store). No-op when `REDIS_ADDR` is unset.
+- **Hardening** (Decisions 35-39): Redis-backed rate limiting (`internal/ratelimit`), trusted-proxy client IPs (`internal/clientip`), server-side logout (`sessions.revoked_at`), break-glass restricted to the bootstrap admin, a refuse-never-link OIDC account policy.
+- **Observability** (Decision 27/47): Prometheus `/metrics` on `METRICS_ADDR`, OTLP tracing when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (`internal/telemetry`).
+
+Not started: the frontend for most of the above (see the repo-root NEXT.md).
+
+### Configuration added with these features
+
+`REDIS_URL` (`redis://`/`rediss://`, same parsing as collab; wins over `REDIS_ADDR`), `REDIS_USERNAME`/`REDIS_PASSWORD`/`REDIS_TLS`, `CORS_ALLOWED_ORIGINS` (opt-in, exact origins, no credentials; Decision 48), `RATE_LIMIT_ENABLED`, `RATE_LIMIT_LOGIN_PER_MINUTE`, `RATE_LIMIT_PUBLIC_PER_MINUTE`, `TRUSTED_PROXIES`, `HISTORY_CLEANUP_SCHEDULE` (cron, `@every 6h`, or `off`), `HISTORY_REVISION_DEBOUNCE`, `METRICS_ADDR`, `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_EXPORTER_OTLP_PROTOCOL`. `INTERNAL_LOGIN_BREAK_GLASS` now requires `BOOTSTRAP_ADMIN_EMAIL`. All are validated at startup; see `internal/config` and `.env.example`.
 
 ## Local development
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/TaliaMarine/little-doc-editor/api/internal/db"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/httpx"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/sessionrecord"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/sessiontoken"
 )
 
@@ -60,6 +61,20 @@ func Middleware(devBypass bool, jwtSecret string, queries *db.Queries, logger *s
 
 			claims, err := sessiontoken.Verify(jwtSecret, token)
 			if err != nil {
+				httpx.WriteError(w, http.StatusUnauthorized, "invalid or expired session")
+				return
+			}
+
+			// Deny-list for server-side logout (SPEC.md §8). A DB failure here
+			// fails closed: an unreadable revocation list must not silently
+			// re-admit revoked sessions.
+			revoked, err := queries.IsSessionRevoked(r.Context(), sessionrecord.HashToken(token))
+			if err != nil {
+				logger.Error("checking session revocation failed", "error", err)
+				httpx.WriteError(w, http.StatusInternalServerError, "invalid session")
+				return
+			}
+			if revoked {
 				httpx.WriteError(w, http.StatusUnauthorized, "invalid or expired session")
 				return
 			}
@@ -140,6 +155,33 @@ func resolveIdentity(r *http.Request, queries *db.Queries, claims sessiontoken.C
 		id.SharePermission = string(link.Permission)
 	}
 	return id, nil
+}
+
+// BearerToken extracts the session token from the Authorization header.
+func BearerToken(r *http.Request) (string, bool) { return bearerToken(r) }
+
+// OptionalUserID returns the user ID behind a valid, unrevoked bearer token
+// if the request carries one, else nil. For public endpoints (share-link
+// redemption) that behave the same for anonymous callers but record who the
+// viewer was when they happen to be signed in. Never errors: an invalid or
+// absent token just means "anonymous".
+func OptionalUserID(r *http.Request, jwtSecret string, queries *db.Queries) *uuid.UUID {
+	token, ok := bearerToken(r)
+	if !ok {
+		return nil
+	}
+	claims, err := sessiontoken.Verify(jwtSecret, token)
+	if err != nil || claims.Subject == "" {
+		return nil
+	}
+	if revoked, err := queries.IsSessionRevoked(r.Context(), sessionrecord.HashToken(token)); err != nil || revoked {
+		return nil
+	}
+	id, err := resolveIdentity(r, queries, claims)
+	if err != nil || id.UserID == nil {
+		return nil
+	}
+	return id.UserID
 }
 
 func bearerToken(r *http.Request) (string, bool) {

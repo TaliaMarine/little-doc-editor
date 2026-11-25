@@ -5,11 +5,16 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/TaliaMarine/little-doc-editor/api/internal/clientip"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/cors"
+	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,6 +30,15 @@ type Config struct {
 	// RedisAddr is the address of the bring-your-own Redis instance used for
 	// collab fan-out and shared session/presence state (Decisions 3, 20, 29).
 	RedisAddr string `yaml:"redisAddr"`
+	// RedisPassword is the Redis AUTH password (REDIS_PASSWORD), optional.
+	// The api uses Redis for the shared rate limiter (SPEC.md §8).
+	RedisPassword string `yaml:"redisPassword"`
+	// RedisUsername (REDIS_USERNAME) for ACL users; RedisTLS (REDIS_TLS)
+	// enables TLS to Redis.
+	RedisUsername string `yaml:"redisUsername"`
+	RedisTLS      bool   `yaml:"redisTLS"`
+	// RedisDB is the logical database number (from REDIS_URL's /db path).
+	RedisDB int `yaml:"redisDB"`
 
 	// DevAuthBypass, when true, skips real session/OIDC authentication
 	// entirely and treats every request as a fixed local-dev org-admin
@@ -89,12 +103,51 @@ type Config struct {
 	S3SecretKey    string `yaml:"s3SecretKey"`
 	S3UsePathStyle bool   `yaml:"s3UsePathStyle"` // true for MinIO and most non-AWS S3-compatible stores
 
-	// Attachment allowlist + max size (Decision 17), both meant to be
-	// admin-configurable instance settings eventually; env-configured for
-	// now with the defaults SPEC.md §7.2 names (images, PDF, common Office
-	// formats, zip, plain text/code).
+	// Attachment allowlist + max size (Decision 17). These are the
+	// deployment *defaults*; an org admin can override both at runtime via
+	// PATCH /admin/settings (stored in instance_settings), and the override
+	// wins until reset. Defaults follow SPEC.md §7.2 (images, PDF, common
+	// Office formats, zip, plain text/code).
 	AttachmentAllowlist    []string `yaml:"attachmentAllowlist"`
 	AttachmentMaxSizeBytes int64    `yaml:"attachmentMaxSizeBytes"`
+
+	// TrustedProxies are the CIDRs (or bare IPs) of reverse proxies whose
+	// X-Forwarded-For header is believed (TRUSTED_PROXIES, comma-separated).
+	// Empty means X-Forwarded-For is ignored and the TCP peer address is the
+	// client address — the safe default when the api is directly exposed.
+	TrustedProxies []string `yaml:"trustedProxies"`
+
+	// CORSAllowedOrigins (CORS_ALLOWED_ORIGINS, comma-separated origins such as
+	// https://docs.example.com) lets a SPA served from another origin call the
+	// api. Empty (default) = no CORS support. Exact origins only, never "*".
+	CORSAllowedOrigins []string `yaml:"corsAllowedOrigins"`
+
+	// RateLimitEnabled turns the login/redeem rate limiter on (default true).
+	// Backed by Redis when REDIS_ADDR is set, with an in-process fallback.
+	RateLimitEnabled bool `yaml:"rateLimitEnabled"`
+	// RateLimitLoginPerMinute caps POST /auth/login attempts per client IP.
+	RateLimitLoginPerMinute int `yaml:"rateLimitLoginPerMinute"`
+	// RateLimitPublicPerMinute caps the other unauthenticated, credential-
+	// or token-taking endpoints (share-link resolve/redeem, invite
+	// resolve/redeem, OIDC login) per client IP.
+	RateLimitPublicPerMinute int `yaml:"rateLimitPublicPerMinute"`
+
+	// HistoryCleanupSchedule is a standard 5-field cron expression (or a
+	// descriptor such as "@every 6h" / "@daily") for the in-process history
+	// cleanup job (Decisions 9, 28). "off" disables the job.
+	HistoryCleanupSchedule string `yaml:"historyCleanupSchedule"`
+	// RevisionDebounce is the minimum gap between two auto-created revisions
+	// of one page by the same author (SPEC.md §6.7: not every save).
+	RevisionDebounce time.Duration `yaml:"revisionDebounce"`
+
+	// MetricsAddr, when set (e.g. ":9090"), serves Prometheus /metrics on a
+	// separate listener that is not routed through the public ingress
+	// (Decision 27). Empty disables it.
+	MetricsAddr string `yaml:"metricsAddr"`
+	// OTelEndpoint (OTEL_EXPORTER_OTLP_ENDPOINT) enables OTLP trace export;
+	// OTelProtocol is "http/protobuf" (default) or "grpc".
+	OTelEndpoint string `yaml:"otelEndpoint"`
+	OTelProtocol string `yaml:"otelProtocol"`
 }
 
 // Defaults returns the config defaults before any file/env overrides —
@@ -109,6 +162,13 @@ func Defaults() Config {
 		S3UsePathStyle:         true,
 		OIDCGroupsClaim:        "groups",
 		AttachmentMaxSizeBytes: 25 * 1024 * 1024, // 25MB
+
+		RateLimitEnabled:         true,
+		RateLimitLoginPerMinute:  10,
+		RateLimitPublicPerMinute: 30,
+		HistoryCleanupSchedule:   "0 3 * * *",
+		RevisionDebounce:         5 * time.Minute,
+		OTelProtocol:             "http/protobuf",
 		AttachmentAllowlist: []string{
 			"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
 			"application/pdf",
@@ -146,6 +206,31 @@ func Load() (Config, error) {
 	}
 	if v := os.Getenv("REDIS_ADDR"); v != "" {
 		cfg.RedisAddr = v
+	}
+	// Same inputs and precedence as the collab service (collab/src/redisConfig.ts):
+	// REDIS_URL (redis:// or rediss://) wins over REDIS_ADDR, and the
+	// separate REDIS_USERNAME / REDIS_PASSWORD / REDIS_TLS override it.
+	if v := os.Getenv("REDIS_URL"); v != "" {
+		if err := applyRedisURL(&cfg, v); err != nil {
+			return Config{}, err
+		}
+	} else if cfg.RedisAddr != "" {
+		addr, err := normalizeRedisAddr(cfg.RedisAddr)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.RedisAddr = addr
+	}
+	if v := os.Getenv("REDIS_PASSWORD"); v != "" {
+		cfg.RedisPassword = v
+	}
+	if v := os.Getenv("REDIS_USERNAME"); v != "" {
+		cfg.RedisUsername = v
+	}
+	if v := os.Getenv("REDIS_TLS"); v != "" {
+		// Same spelling as collab: only "true"/"1" enable it; a rediss:// URL
+		// still forces TLS on.
+		cfg.RedisTLS = v == "true" || v == "1" || strings.HasPrefix(os.Getenv("REDIS_URL"), "rediss://")
 	}
 	if v := os.Getenv("DEV_AUTH_BYPASS"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -240,12 +325,7 @@ func Load() (Config, error) {
 		// Trimmed so "image/png, application/pdf" (a natural way to write
 		// it in a values file) doesn't silently produce " application/pdf",
 		// which would never match a sniffed type.
-		cfg.AttachmentAllowlist = nil
-		for _, t := range strings.Split(v, ",") {
-			if t = strings.TrimSpace(t); t != "" {
-				cfg.AttachmentAllowlist = append(cfg.AttachmentAllowlist, t)
-			}
-		}
+		cfg.AttachmentAllowlist = splitList(v)
 	}
 	if v := os.Getenv("ATTACHMENT_MAX_SIZE_BYTES"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
@@ -255,10 +335,78 @@ func Load() (Config, error) {
 		cfg.AttachmentMaxSizeBytes = n
 	}
 
+	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
+		cfg.TrustedProxies = splitList(v)
+	}
+	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
+		cfg.CORSAllowedOrigins = splitList(v) // replaces any YAML list, like other env overrides
+	}
+	if v := os.Getenv("RATE_LIMIT_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("RATE_LIMIT_ENABLED must be true/false: %w", err)
+		}
+		cfg.RateLimitEnabled = b
+	}
+	for _, e := range []struct {
+		name string
+		dst  *int
+	}{
+		{"RATE_LIMIT_LOGIN_PER_MINUTE", &cfg.RateLimitLoginPerMinute},
+		{"RATE_LIMIT_PUBLIC_PER_MINUTE", &cfg.RateLimitPublicPerMinute},
+	} {
+		if v := os.Getenv(e.name); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return Config{}, fmt.Errorf("%s must be an integer: %w", e.name, err)
+			}
+			*e.dst = n
+		}
+	}
+	if v := os.Getenv("HISTORY_CLEANUP_SCHEDULE"); v != "" {
+		cfg.HistoryCleanupSchedule = v
+	}
+	if v := os.Getenv("HISTORY_REVISION_DEBOUNCE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("HISTORY_REVISION_DEBOUNCE must be a duration (e.g. 5m): %w", err)
+		}
+		cfg.RevisionDebounce = d
+	}
+	if v := os.Getenv("METRICS_ADDR"); v != "" {
+		cfg.MetricsAddr = v
+	}
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
+		cfg.OTelEndpoint = v
+	}
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"); v != "" {
+		cfg.OTelProtocol = v
+	}
+
+	// Origins from YAML and env alike: validate and canonicalize.
+	for i, o := range cfg.CORSAllowedOrigins {
+		n, err := cors.NormalizeOrigin(o)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.CORSAllowedOrigins[i] = n
+	}
+
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// splitList splits a comma-separated env value, trimming blanks.
+func splitList(v string) []string {
+	var out []string
+	for _, t := range strings.Split(v, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func loadYAMLFile(path string, cfg *Config) error {
@@ -307,10 +455,108 @@ func (c Config) validate() error {
 	if (c.BootstrapAdminEmail == "") != (c.BootstrapAdminPassword == "") {
 		return fmt.Errorf("BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD must be set together")
 	}
+	if c.InternalLoginBreakGlass && c.BootstrapAdminEmail == "" {
+		// Break-glass restores login for the bootstrap admin only
+		// (Decision 14), and that account is identified by this email.
+		return fmt.Errorf("INTERNAL_LOGIN_BREAK_GLASS requires BOOTSTRAP_ADMIN_EMAIL (break-glass is restricted to the bootstrap admin)")
+	}
+	if _, err := clientip.New(c.TrustedProxies); err != nil {
+		return err
+	}
+	if c.RateLimitLoginPerMinute <= 0 || c.RateLimitPublicPerMinute <= 0 {
+		return fmt.Errorf("RATE_LIMIT_LOGIN_PER_MINUTE and RATE_LIMIT_PUBLIC_PER_MINUTE must be positive")
+	}
+	if c.RevisionDebounce < 0 {
+		return fmt.Errorf("HISTORY_REVISION_DEBOUNCE must not be negative")
+	}
+	if s := c.HistoryCleanupSchedule; s != "" && s != "off" {
+		if _, err := cron.ParseStandard(s); err != nil {
+			return fmt.Errorf("HISTORY_CLEANUP_SCHEDULE %q is not a valid cron expression (use 5 fields, @daily, @every 6h, or \"off\"): %w", s, err)
+		}
+	}
+	switch c.OTelProtocol {
+	case "http/protobuf", "grpc":
+	default:
+		return fmt.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL must be http/protobuf or grpc, got %q", c.OTelProtocol)
+	}
 	if c.OIDCEnabled && (c.OIDCIssuer == "" || c.OIDCClientID == "" || c.OIDCRedirectURL == "") {
 		// OIDC_CLIENT_SECRET is deliberately optional: the client is a public
 		// client authenticating with PKCE alone.
 		return fmt.Errorf("OIDC_ISSUER, OIDC_CLIENT_ID, and OIDC_REDIRECT_URL are all required when OIDC_ENABLED=true")
+	}
+	return nil
+}
+
+// applyRedisURL fills the Redis settings from a redis:// or rediss:// URL
+// (rediss implies TLS).
+func applyRedisURL(cfg *Config, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		// Don't echo the URL: it may carry a password.
+		return fmt.Errorf("REDIS_URL is not a valid URL")
+	}
+	if u.Scheme != "redis" && u.Scheme != "rediss" {
+		return fmt.Errorf("REDIS_URL must use redis:// or rediss://")
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("REDIS_URL has no host")
+	}
+	port := u.Port()
+	if port == "" {
+		port = "6379"
+	}
+	cfg.RedisAddr = net.JoinHostPort(u.Hostname(), port)
+	if _, err := normalizeRedisAddr(cfg.RedisAddr); err != nil {
+		return err
+	}
+	if u.User != nil {
+		cfg.RedisUsername = u.User.Username()
+		cfg.RedisPassword, _ = u.User.Password()
+	}
+	if db := strings.TrimPrefix(u.Path, "/"); db != "" {
+		n, err := strconv.Atoi(db)
+		if err != nil || n < 0 {
+			return fmt.Errorf("REDIS_URL database must be a non-negative integer")
+		}
+		cfg.RedisDB = n
+	}
+	cfg.RedisTLS = cfg.RedisTLS || u.Scheme == "rediss"
+	return nil
+}
+
+// normalizeRedisAddr turns the forms REDIS_ADDR accepts (host, host:port,
+// [v6]:port, bare IPv6 literal) into host:port.
+func normalizeRedisAddr(addr string) (string, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", fmt.Errorf("empty REDIS_ADDR")
+	}
+	if strings.HasPrefix(addr, "[") {
+		if _, port, err := net.SplitHostPort(addr); err == nil {
+			return addr, checkPort(addr, port)
+		}
+		if strings.HasSuffix(addr, "]") && len(addr) > 2 { // [v6] without a port
+			return addr + ":6379", nil
+		}
+		return "", fmt.Errorf("invalid REDIS_ADDR %q", addr)
+	}
+	switch strings.Count(addr, ":") {
+	case 0:
+		return addr + ":6379", nil
+	case 1:
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || host == "" {
+			return "", fmt.Errorf("invalid REDIS_ADDR %q", addr)
+		}
+		return addr, checkPort(addr, port)
+	default: // unbracketed IPv6 literal: no port can be expressed
+		return net.JoinHostPort(addr, "6379"), nil
+	}
+}
+
+func checkPort(addr, port string) error {
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid REDIS_ADDR %q: bad port", addr)
 	}
 	return nil
 }

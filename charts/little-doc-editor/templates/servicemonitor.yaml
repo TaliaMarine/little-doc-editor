@@ -12,16 +12,21 @@ metadata:
   labels:
     {{- include "little-doc-editor.labels" . | nindent 4 }}
 spec:
-  # api only: the frontend is a static SPA with nothing to scrape, and
-  # collab's Service port is named "ws" — add a second endpoint for it once
-  # collab actually serves /metrics.
+  # api and collab (each on a dedicated `metrics` port, never routed through ingress).
+  # A Service lacking one of the named ports simply yields no targets for
+  # that endpoint. The frontend is a static SPA with nothing to scrape.
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "little-doc-editor.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: api
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [api, collab]
   endpoints:
-    - port: http
+    {{- if or .Values.api.metrics.enabled .Values.collab.metrics.enabled }}
+    - port: metrics
       path: /metrics
       interval: {{ .Values.observability.serviceMonitor.interval }}
+    {{- end }}
 {{- end }}

@@ -11,23 +11,55 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimInvite = `-- name: ClaimInvite :one
+UPDATE invites SET redeemed_at = now()
+WHERE token_hash = $1
+  AND redeemed_at IS NULL
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > now())
+RETURNING id, email, grants_org_admin, created_by_user_id, expires_at, redeemed_at, redeemed_by_user_id, created_at, token_hash, revoked_at
+`
+
+// Atomically consumes a usable invite (not redeemed, not revoked, not
+// expired), so two concurrent redemptions can't both win. Run inside the
+// same transaction that creates the user, so a failed user insert (e.g. an
+// email conflict) rolls the claim back.
+func (q *Queries) ClaimInvite(ctx context.Context, tokenHash string) (Invite, error) {
+	row := q.db.QueryRow(ctx, claimInvite, tokenHash)
+	var i Invite
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.GrantsOrgAdmin,
+		&i.CreatedByUserID,
+		&i.ExpiresAt,
+		&i.RedeemedAt,
+		&i.RedeemedByUserID,
+		&i.CreatedAt,
+		&i.TokenHash,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const createInvite = `-- name: CreateInvite :one
-INSERT INTO invites (token, email, grants_org_admin, created_by_user_id, expires_at)
+INSERT INTO invites (token_hash, email, grants_org_admin, created_by_user_id, expires_at)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, token, email, grants_org_admin, created_by_user_id, expires_at, redeemed_at, redeemed_by_user_id, created_at
+RETURNING id, email, grants_org_admin, created_by_user_id, expires_at, redeemed_at, redeemed_by_user_id, created_at, token_hash, revoked_at
 `
 
 type CreateInviteParams struct {
-	Token           string             `json:"token"`
+	TokenHash       string             `json:"token_hash"`
 	Email           *string            `json:"email"`
 	GrantsOrgAdmin  bool               `json:"grants_org_admin"`
 	CreatedByUserID pgtype.UUID        `json:"created_by_user_id"`
 	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
 }
 
+// token_hash is the hex SHA-256 of the bearer token; the plaintext is never stored.
 func (q *Queries) CreateInvite(ctx context.Context, arg CreateInviteParams) (Invite, error) {
 	row := q.db.QueryRow(ctx, createInvite,
-		arg.Token,
+		arg.TokenHash,
 		arg.Email,
 		arg.GrantsOrgAdmin,
 		arg.CreatedByUserID,
@@ -36,7 +68,6 @@ func (q *Queries) CreateInvite(ctx context.Context, arg CreateInviteParams) (Inv
 	var i Invite
 	err := row.Scan(
 		&i.ID,
-		&i.Token,
 		&i.Email,
 		&i.GrantsOrgAdmin,
 		&i.CreatedByUserID,
@@ -44,20 +75,21 @@ func (q *Queries) CreateInvite(ctx context.Context, arg CreateInviteParams) (Inv
 		&i.RedeemedAt,
 		&i.RedeemedByUserID,
 		&i.CreatedAt,
+		&i.TokenHash,
+		&i.RevokedAt,
 	)
 	return i, err
 }
 
-const getInviteByToken = `-- name: GetInviteByToken :one
-SELECT id, token, email, grants_org_admin, created_by_user_id, expires_at, redeemed_at, redeemed_by_user_id, created_at FROM invites WHERE token = $1
+const getInviteByID = `-- name: GetInviteByID :one
+SELECT id, email, grants_org_admin, created_by_user_id, expires_at, redeemed_at, redeemed_by_user_id, created_at, token_hash, revoked_at FROM invites WHERE id = $1
 `
 
-func (q *Queries) GetInviteByToken(ctx context.Context, token string) (Invite, error) {
-	row := q.db.QueryRow(ctx, getInviteByToken, token)
+func (q *Queries) GetInviteByID(ctx context.Context, id pgtype.UUID) (Invite, error) {
+	row := q.db.QueryRow(ctx, getInviteByID, id)
 	var i Invite
 	err := row.Scan(
 		&i.ID,
-		&i.Token,
 		&i.Email,
 		&i.GrantsOrgAdmin,
 		&i.CreatedByUserID,
@@ -65,33 +97,76 @@ func (q *Queries) GetInviteByToken(ctx context.Context, token string) (Invite, e
 		&i.RedeemedAt,
 		&i.RedeemedByUserID,
 		&i.CreatedAt,
+		&i.TokenHash,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const getInviteByTokenHash = `-- name: GetInviteByTokenHash :one
+SELECT id, email, grants_org_admin, created_by_user_id, expires_at, redeemed_at, redeemed_by_user_id, created_at, token_hash, revoked_at FROM invites WHERE token_hash = $1
+`
+
+func (q *Queries) GetInviteByTokenHash(ctx context.Context, tokenHash string) (Invite, error) {
+	row := q.db.QueryRow(ctx, getInviteByTokenHash, tokenHash)
+	var i Invite
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.GrantsOrgAdmin,
+		&i.CreatedByUserID,
+		&i.ExpiresAt,
+		&i.RedeemedAt,
+		&i.RedeemedByUserID,
+		&i.CreatedAt,
+		&i.TokenHash,
+		&i.RevokedAt,
 	)
 	return i, err
 }
 
 const listInvites = `-- name: ListInvites :many
-SELECT id, token, email, grants_org_admin, created_by_user_id, expires_at, redeemed_at, redeemed_by_user_id, created_at FROM invites ORDER BY created_at DESC
+SELECT i.id, i.email, i.grants_org_admin, i.created_by_user_id, i.expires_at,
+       i.redeemed_at, i.redeemed_by_user_id, i.revoked_at, i.created_at,
+       cu.display_name AS created_by_display_name
+FROM invites i
+LEFT JOIN users cu ON cu.id = i.created_by_user_id
+ORDER BY i.created_at DESC
 `
 
-func (q *Queries) ListInvites(ctx context.Context) ([]Invite, error) {
+type ListInvitesRow struct {
+	ID                   pgtype.UUID        `json:"id"`
+	Email                *string            `json:"email"`
+	GrantsOrgAdmin       bool               `json:"grants_org_admin"`
+	CreatedByUserID      pgtype.UUID        `json:"created_by_user_id"`
+	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
+	RedeemedAt           pgtype.Timestamptz `json:"redeemed_at"`
+	RedeemedByUserID     pgtype.UUID        `json:"redeemed_by_user_id"`
+	RevokedAt            pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	CreatedByDisplayName *string            `json:"created_by_display_name"`
+}
+
+func (q *Queries) ListInvites(ctx context.Context) ([]ListInvitesRow, error) {
 	rows, err := q.db.Query(ctx, listInvites)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Invite
+	var items []ListInvitesRow
 	for rows.Next() {
-		var i Invite
+		var i ListInvitesRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.Token,
 			&i.Email,
 			&i.GrantsOrgAdmin,
 			&i.CreatedByUserID,
 			&i.ExpiresAt,
 			&i.RedeemedAt,
 			&i.RedeemedByUserID,
+			&i.RevokedAt,
 			&i.CreatedAt,
+			&i.CreatedByDisplayName,
 		); err != nil {
 			return nil, err
 		}
@@ -103,16 +178,41 @@ func (q *Queries) ListInvites(ctx context.Context) ([]Invite, error) {
 	return items, nil
 }
 
-const redeemInvite = `-- name: RedeemInvite :exec
-UPDATE invites SET redeemed_at = now(), redeemed_by_user_id = $2 WHERE id = $1
+const revokeInvite = `-- name: RevokeInvite :one
+UPDATE invites SET revoked_at = now()
+WHERE id = $1 AND redeemed_at IS NULL AND revoked_at IS NULL
+RETURNING id, email, grants_org_admin, created_by_user_id, expires_at, redeemed_at, redeemed_by_user_id, created_at, token_hash, revoked_at
 `
 
-type RedeemInviteParams struct {
+// Only a still-pending invite can be revoked; returns no row otherwise.
+func (q *Queries) RevokeInvite(ctx context.Context, id pgtype.UUID) (Invite, error) {
+	row := q.db.QueryRow(ctx, revokeInvite, id)
+	var i Invite
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.GrantsOrgAdmin,
+		&i.CreatedByUserID,
+		&i.ExpiresAt,
+		&i.RedeemedAt,
+		&i.RedeemedByUserID,
+		&i.CreatedAt,
+		&i.TokenHash,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
+const setInviteRedeemedBy = `-- name: SetInviteRedeemedBy :exec
+UPDATE invites SET redeemed_by_user_id = $2 WHERE id = $1
+`
+
+type SetInviteRedeemedByParams struct {
 	ID               pgtype.UUID `json:"id"`
 	RedeemedByUserID pgtype.UUID `json:"redeemed_by_user_id"`
 }
 
-func (q *Queries) RedeemInvite(ctx context.Context, arg RedeemInviteParams) error {
-	_, err := q.db.Exec(ctx, redeemInvite, arg.ID, arg.RedeemedByUserID)
+func (q *Queries) SetInviteRedeemedBy(ctx context.Context, arg SetInviteRedeemedByParams) error {
+	_, err := q.db.Exec(ctx, setInviteRedeemedBy, arg.ID, arg.RedeemedByUserID)
 	return err
 }

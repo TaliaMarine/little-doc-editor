@@ -48,6 +48,18 @@ export async function authorizeDocument (identity: SessionIdentity, documentName
   if (!CANONICAL_UUID_RE.test(documentName)) {
     throw new AccessDeniedError('document name is not a lowercase page id')
   }
+  // Server-side logout (sessions.revoked_at deny-list, same rule as api's
+  // IsSessionRevoked): a revoked token must stop working here too, including
+  // on already-open sockets (re-checked by app.ts).
+  if (identity.tokenHash) {
+    const { rows } = await pool.query<{ revoked: boolean }>(
+      'SELECT EXISTS (SELECT 1 FROM sessions WHERE token_hash = $1 AND revoked_at IS NOT NULL) AS revoked',
+      [identity.tokenHash],
+    )
+    if (rows[0]?.revoked) {
+      throw new AccessDeniedError('session was revoked')
+    }
+  }
   if (identity.userId) {
     return authorizeUser(identity.userId, documentName)
   }
@@ -63,16 +75,23 @@ async function authorizeUser (userId: string, pageId: string): Promise<DocumentA
   if (!UUID_RE.test(userId)) {
     throw new AccessDeniedError('invalid user id')
   }
+  // The role is the highest of the user's direct membership and any role
+  // granted to a group they belong to — same rule as api's
+  // GetSpaceMemberRole (space_members.group_id / group_members).
   const { rows } = await pool.query<{
     disabled: boolean
     is_org_admin: boolean
     locked: boolean
-    role: 'owner' | 'admin' | 'editor' | 'viewer' | null
+    role: keyof typeof ROLE_RANK | null
   }>(
-    `SELECT u.disabled, u.is_org_admin, p.locked, sm.role
+    `SELECT u.disabled, u.is_org_admin, p.locked,
+       (SELECT sm.role::text FROM space_members sm
+        WHERE sm.space_id = p.space_id
+          AND (sm.user_id = u.id
+               OR sm.group_id IN (SELECT gm.group_id FROM group_members gm WHERE gm.user_id = u.id))
+        ORDER BY sm.role LIMIT 1) AS role
      FROM pages p
      JOIN users u ON u.id = $2
-     LEFT JOIN space_members sm ON sm.space_id = p.space_id AND sm.user_id = u.id
      WHERE p.id = $1`,
     [pageId, userId],
   )

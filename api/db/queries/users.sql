@@ -60,3 +60,33 @@ RETURNING *;
 
 -- name: TouchUserLogin :exec
 UPDATE users SET last_login_at = now() WHERE id = $1;
+
+-- name: ListUsers :many
+-- Org-admin user directory. q (optional) filters by email/display name.
+SELECT id, email, display_name, auth_provider, is_org_admin, disabled, created_at, last_login_at
+FROM users
+WHERE (sqlc.narg('q')::text IS NULL
+       OR email ILIKE '%' || sqlc.narg('q')::text || '%'
+       OR display_name ILIKE '%' || sqlc.narg('q')::text || '%')
+ORDER BY lower(display_name), email
+LIMIT $1 OFFSET $2;
+
+-- name: SearchMemberCandidates :many
+-- Enabled users that are not yet a direct member of the space — the picker a
+-- space admin uses to add a member (no org-admin rights needed).
+SELECT u.id, u.email, u.display_name
+FROM users u
+WHERE u.disabled = false
+  AND (u.email ILIKE '%' || sqlc.arg('q')::text || '%' OR u.display_name ILIKE '%' || sqlc.arg('q')::text || '%')
+  AND NOT EXISTS (SELECT 1 FROM space_members sm WHERE sm.space_id = sqlc.arg('space_id') AND sm.user_id = u.id)
+ORDER BY lower(u.display_name), u.email
+LIMIT $1;
+
+-- name: LockUserRow :one
+-- Serializes concurrent admin changes (last-org-admin guard) on one user row.
+SELECT id FROM users WHERE id = $1 FOR UPDATE;
+
+-- name: LockOrgAdminChanges :exec
+-- Transaction-scoped advisory lock serializing changes that could remove the
+-- last enabled org admin.
+SELECT pg_advisory_xact_lock(hashtext('lde:org-admin-changes'));

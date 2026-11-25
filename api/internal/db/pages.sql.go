@@ -11,6 +11,45 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countLockedPagesInSubtree = `-- name: CountLockedPagesInSubtree :one
+WITH RECURSIVE tree AS (
+    SELECT root.id AS id FROM pages root WHERE root.id = $1
+    UNION
+    SELECT child.id AS id FROM pages child JOIN tree t ON child.parent_id = t.id
+)
+SELECT count(*) FROM pages p JOIN tree ON p.id = tree.id WHERE p.locked
+`
+
+// Locked pages in a page's subtree (including the page itself).
+func (q *Queries) CountLockedPagesInSubtree(ctx context.Context, id pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countLockedPagesInSubtree, id)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createHistoryCleanupLog = `-- name: CreateHistoryCleanupLog :exec
+INSERT INTO history_cleanup_logs (space_id, deleted_count, oldest_deleted_at, newest_deleted_at)
+VALUES ($1, $2, $3, $4)
+`
+
+type CreateHistoryCleanupLogParams struct {
+	SpaceID         pgtype.UUID        `json:"space_id"`
+	DeletedCount    int32              `json:"deleted_count"`
+	OldestDeletedAt pgtype.Timestamptz `json:"oldest_deleted_at"`
+	NewestDeletedAt pgtype.Timestamptz `json:"newest_deleted_at"`
+}
+
+func (q *Queries) CreateHistoryCleanupLog(ctx context.Context, arg CreateHistoryCleanupLogParams) error {
+	_, err := q.db.Exec(ctx, createHistoryCleanupLog,
+		arg.SpaceID,
+		arg.DeletedCount,
+		arg.OldestDeletedAt,
+		arg.NewestDeletedAt,
+	)
+	return err
+}
+
 const createPage = `-- name: CreatePage :one
 INSERT INTO pages (space_id, parent_id, position, title, content, created_by_user_id)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -57,22 +96,29 @@ func (q *Queries) CreatePage(ctx context.Context, arg CreatePageParams) (Page, e
 }
 
 const createPageRevision = `-- name: CreatePageRevision :one
-INSERT INTO page_revisions (page_id, content, author_user_id, author_guest_id)
-VALUES ($1, $2, $3, $4)
-RETURNING id, page_id, content, author_user_id, author_guest_id, created_at
+
+INSERT INTO page_revisions (page_id, content, title, author_user_id, author_guest_id, created_at)
+VALUES ($1, $2, $3, $4, $5, clock_timestamp())
+RETURNING id, page_id, content, author_user_id, author_guest_id, created_at, title
 `
 
 type CreatePageRevisionParams struct {
 	PageID        pgtype.UUID `json:"page_id"`
 	Content       []byte      `json:"content"`
+	Title         *string     `json:"title"`
 	AuthorUserID  pgtype.UUID `json:"author_user_id"`
 	AuthorGuestID pgtype.UUID `json:"author_guest_id"`
 }
 
+// one past exportapi's page cap
+// clock_timestamp(), not the column default now(): several revisions can be
+// written in one transaction (save + preserved state, restore) and must keep
+// their order, but now() is constant within a transaction.
 func (q *Queries) CreatePageRevision(ctx context.Context, arg CreatePageRevisionParams) (PageRevision, error) {
 	row := q.db.QueryRow(ctx, createPageRevision,
 		arg.PageID,
 		arg.Content,
+		arg.Title,
 		arg.AuthorUserID,
 		arg.AuthorGuestID,
 	)
@@ -84,6 +130,35 @@ func (q *Queries) CreatePageRevision(ctx context.Context, arg CreatePageRevision
 		&i.AuthorUserID,
 		&i.AuthorGuestID,
 		&i.CreatedAt,
+		&i.Title,
+	)
+	return i, err
+}
+
+const deletePage = `-- name: DeletePage :exec
+DELETE FROM pages WHERE id = $1
+`
+
+func (q *Queries) DeletePage(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deletePage, id)
+	return err
+}
+
+const getLatestPageRevision = `-- name: GetLatestPageRevision :one
+SELECT id, page_id, content, author_user_id, author_guest_id, created_at, title FROM page_revisions WHERE page_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1
+`
+
+func (q *Queries) GetLatestPageRevision(ctx context.Context, pageID pgtype.UUID) (PageRevision, error) {
+	row := q.db.QueryRow(ctx, getLatestPageRevision, pageID)
+	var i PageRevision
+	err := row.Scan(
+		&i.ID,
+		&i.PageID,
+		&i.Content,
+		&i.AuthorUserID,
+		&i.AuthorGuestID,
+		&i.CreatedAt,
+		&i.Title,
 	)
 	return i, err
 }
@@ -145,6 +220,133 @@ func (q *Queries) GetPageByID(ctx context.Context, id pgtype.UUID) (Page, error)
 	return i, err
 }
 
+const getPageByIDForUpdate = `-- name: GetPageByIDForUpdate :one
+SELECT id, space_id, parent_id, position, title, content, search_vector, history_enabled, locked, is_template, template_key, created_by_user_id, created_by_guest_id, created_at, updated_at FROM pages WHERE id = $1 FOR UPDATE
+`
+
+// Row-locks the page inside a transaction (writers lock the page row first).
+func (q *Queries) GetPageByIDForUpdate(ctx context.Context, id pgtype.UUID) (Page, error) {
+	row := q.db.QueryRow(ctx, getPageByIDForUpdate, id)
+	var i Page
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.ParentID,
+		&i.Position,
+		&i.Title,
+		&i.Content,
+		&i.SearchVector,
+		&i.HistoryEnabled,
+		&i.Locked,
+		&i.IsTemplate,
+		&i.TemplateKey,
+		&i.CreatedByUserID,
+		&i.CreatedByGuestID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getPageRevision = `-- name: GetPageRevision :one
+SELECT r.id, r.page_id, r.content, r.title, r.author_user_id, r.author_guest_id, r.created_at,
+       u.display_name AS author_user_display_name,
+       g.display_name AS author_guest_display_name
+FROM page_revisions r
+LEFT JOIN users u ON u.id = r.author_user_id
+LEFT JOIN guest_identities g ON g.id = r.author_guest_id
+WHERE r.id = $1 AND r.page_id = $2
+`
+
+type GetPageRevisionParams struct {
+	ID     pgtype.UUID `json:"id"`
+	PageID pgtype.UUID `json:"page_id"`
+}
+
+type GetPageRevisionRow struct {
+	ID                     pgtype.UUID        `json:"id"`
+	PageID                 pgtype.UUID        `json:"page_id"`
+	Content                []byte             `json:"content"`
+	Title                  *string            `json:"title"`
+	AuthorUserID           pgtype.UUID        `json:"author_user_id"`
+	AuthorGuestID          pgtype.UUID        `json:"author_guest_id"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	AuthorUserDisplayName  *string            `json:"author_user_display_name"`
+	AuthorGuestDisplayName *string            `json:"author_guest_display_name"`
+}
+
+func (q *Queries) GetPageRevision(ctx context.Context, arg GetPageRevisionParams) (GetPageRevisionRow, error) {
+	row := q.db.QueryRow(ctx, getPageRevision, arg.ID, arg.PageID)
+	var i GetPageRevisionRow
+	err := row.Scan(
+		&i.ID,
+		&i.PageID,
+		&i.Content,
+		&i.Title,
+		&i.AuthorUserID,
+		&i.AuthorGuestID,
+		&i.CreatedAt,
+		&i.AuthorUserDisplayName,
+		&i.AuthorGuestDisplayName,
+	)
+	return i, err
+}
+
+const listAttachmentKeysForPageTree = `-- name: ListAttachmentKeysForPageTree :many
+WITH RECURSIVE tree AS (
+    SELECT root.id AS id FROM pages root WHERE root.id = $1
+    UNION
+    SELECT child.id AS id FROM pages child JOIN tree t ON child.parent_id = t.id
+)
+SELECT a.s3_key FROM attachments a JOIN tree ON a.page_id = tree.id
+`
+
+// S3 keys of every attachment on a page and its descendants, collected before
+// a delete cascades the rows away so the blobs can be removed too.
+func (q *Queries) ListAttachmentKeysForPageTree(ctx context.Context, id pgtype.UUID) ([]string, error) {
+	rows, err := q.db.Query(ctx, listAttachmentKeysForPageTree, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var s3_key string
+		if err := rows.Scan(&s3_key); err != nil {
+			return nil, err
+		}
+		items = append(items, s3_key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAttachmentKeysForSpace = `-- name: ListAttachmentKeysForSpace :many
+SELECT a.s3_key FROM attachments a JOIN pages p ON p.id = a.page_id WHERE p.space_id = $1
+`
+
+func (q *Queries) ListAttachmentKeysForSpace(ctx context.Context, spaceID pgtype.UUID) ([]string, error) {
+	rows, err := q.db.Query(ctx, listAttachmentKeysForSpace, spaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var s3_key string
+		if err := rows.Scan(&s3_key); err != nil {
+			return nil, err
+		}
+		items = append(items, s3_key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listChildPages = `-- name: ListChildPages :many
 SELECT id, space_id, parent_id, position, title, content, search_vector, history_enabled, locked, is_template, template_key, created_by_user_id, created_by_guest_id, created_at, updated_at FROM pages WHERE space_id = $1 AND parent_id = $2 ORDER BY position
 `
@@ -191,24 +393,104 @@ func (q *Queries) ListChildPages(ctx context.Context, arg ListChildPagesParams) 
 }
 
 const listPageRevisions = `-- name: ListPageRevisions :many
-SELECT id, page_id, content, author_user_id, author_guest_id, created_at FROM page_revisions WHERE page_id = $1 ORDER BY created_at DESC
+SELECT r.id, r.page_id, r.title, r.author_user_id, r.author_guest_id, r.created_at,
+       u.display_name AS author_user_display_name,
+       g.display_name AS author_guest_display_name
+FROM page_revisions r
+LEFT JOIN users u ON u.id = r.author_user_id
+LEFT JOIN guest_identities g ON g.id = r.author_guest_id
+WHERE r.page_id = $1
+ORDER BY r.created_at DESC, r.id DESC
+LIMIT $2 OFFSET $3
 `
 
-func (q *Queries) ListPageRevisions(ctx context.Context, pageID pgtype.UUID) ([]PageRevision, error) {
-	rows, err := q.db.Query(ctx, listPageRevisions, pageID)
+type ListPageRevisionsParams struct {
+	PageID pgtype.UUID `json:"page_id"`
+	Limit  int32       `json:"limit"`
+	Offset int32       `json:"offset"`
+}
+
+type ListPageRevisionsRow struct {
+	ID                     pgtype.UUID        `json:"id"`
+	PageID                 pgtype.UUID        `json:"page_id"`
+	Title                  *string            `json:"title"`
+	AuthorUserID           pgtype.UUID        `json:"author_user_id"`
+	AuthorGuestID          pgtype.UUID        `json:"author_guest_id"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	AuthorUserDisplayName  *string            `json:"author_user_display_name"`
+	AuthorGuestDisplayName *string            `json:"author_guest_display_name"`
+}
+
+// History list: metadata only (no content, which can be large).
+func (q *Queries) ListPageRevisions(ctx context.Context, arg ListPageRevisionsParams) ([]ListPageRevisionsRow, error) {
+	rows, err := q.db.Query(ctx, listPageRevisions, arg.PageID, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []PageRevision
+	var items []ListPageRevisionsRow
 	for rows.Next() {
-		var i PageRevision
+		var i ListPageRevisionsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.PageID,
-			&i.Content,
+			&i.Title,
 			&i.AuthorUserID,
 			&i.AuthorGuestID,
+			&i.CreatedAt,
+			&i.AuthorUserDisplayName,
+			&i.AuthorGuestDisplayName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPageSubtree = `-- name: ListPageSubtree :many
+WITH RECURSIVE tree AS (
+    SELECT root.id AS id FROM pages root WHERE root.id = $1
+    UNION
+    SELECT child.id AS id FROM pages child JOIN tree t ON child.parent_id = t.id
+)
+SELECT p.id, p.space_id, p.parent_id, p.position, p.title, p.content, p.created_at
+FROM pages p JOIN tree ON p.id = tree.id
+ORDER BY p.position, p.created_at, p.id
+LIMIT 2001
+`
+
+type ListPageSubtreeRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	SpaceID   pgtype.UUID        `json:"space_id"`
+	ParentID  pgtype.UUID        `json:"parent_id"`
+	Position  float64            `json:"position"`
+	Title     string             `json:"title"`
+	Content   []byte             `json:"content"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// A page and all its descendants with content, for export. Depth-first
+// ordering is reconstructed in Go from parent_id/position.
+func (q *Queries) ListPageSubtree(ctx context.Context, id pgtype.UUID) ([]ListPageSubtreeRow, error) {
+	rows, err := q.db.Query(ctx, listPageSubtree, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPageSubtreeRow
+	for rows.Next() {
+		var i ListPageSubtreeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.ParentID,
+			&i.Position,
+			&i.Title,
+			&i.Content,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -315,32 +597,43 @@ func (q *Queries) ListRootPages(ctx context.Context, spaceID pgtype.UUID) ([]Pag
 	return items, nil
 }
 
-const pruneRevisionsBeyondAge = `-- name: PruneRevisionsBeyondAge :many
-DELETE FROM page_revisions
-WHERE page_id = $1 AND created_at < $2
-RETURNING id, created_at
+const listSpacePagesForExport = `-- name: ListSpacePagesForExport :many
+
+SELECT id, space_id, parent_id, position, title, content, created_at
+FROM pages WHERE space_id = $1
+ORDER BY position, created_at, id
+LIMIT 2001
 `
 
-type PruneRevisionsBeyondAgeParams struct {
-	PageID    pgtype.UUID        `json:"page_id"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
-}
-
-type PruneRevisionsBeyondAgeRow struct {
+type ListSpacePagesForExportRow struct {
 	ID        pgtype.UUID        `json:"id"`
+	SpaceID   pgtype.UUID        `json:"space_id"`
+	ParentID  pgtype.UUID        `json:"parent_id"`
+	Position  float64            `json:"position"`
+	Title     string             `json:"title"`
+	Content   []byte             `json:"content"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
-func (q *Queries) PruneRevisionsBeyondAge(ctx context.Context, arg PruneRevisionsBeyondAgeParams) ([]PruneRevisionsBeyondAgeRow, error) {
-	rows, err := q.db.Query(ctx, pruneRevisionsBeyondAge, arg.PageID, arg.CreatedAt)
+// one past exportapi's page cap, so an oversized export is refused without loading it all
+func (q *Queries) ListSpacePagesForExport(ctx context.Context, spaceID pgtype.UUID) ([]ListSpacePagesForExportRow, error) {
+	rows, err := q.db.Query(ctx, listSpacePagesForExport, spaceID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []PruneRevisionsBeyondAgeRow
+	var items []ListSpacePagesForExportRow
 	for rows.Next() {
-		var i PruneRevisionsBeyondAgeRow
-		if err := rows.Scan(&i.ID, &i.CreatedAt); err != nil {
+		var i ListSpacePagesForExportRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.ParentID,
+			&i.Position,
+			&i.Title,
+			&i.Content,
+			&i.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -351,41 +644,52 @@ func (q *Queries) PruneRevisionsBeyondAge(ctx context.Context, arg PruneRevision
 	return items, nil
 }
 
-const pruneRevisionsBeyondCount = `-- name: PruneRevisionsBeyondCount :many
-DELETE FROM page_revisions AS outer_pr
-WHERE outer_pr.page_id = $1
-  AND outer_pr.id IN (
-    SELECT inner_pr.id FROM page_revisions AS inner_pr
-    WHERE inner_pr.page_id = $1
-    ORDER BY inner_pr.created_at DESC
-    OFFSET $2
+const pruneSpaceRevisions = `-- name: PruneSpaceRevisions :many
+WITH ranked AS (
+    SELECT r.id, r.created_at,
+           row_number() OVER (PARTITION BY r.page_id ORDER BY r.created_at DESC, r.id DESC) AS rn
+    FROM page_revisions r
+    JOIN pages p ON p.id = r.page_id
+    WHERE p.space_id = $1
+)
+DELETE FROM page_revisions pr
+USING ranked
+WHERE pr.id = ranked.id
+  AND (
+    ($2::integer IS NOT NULL AND ranked.rn > $2::integer)
+    OR ($3::integer IS NOT NULL AND ranked.rn > 1
+        AND ranked.created_at < now() - make_interval(days => $3::integer))
   )
-RETURNING outer_pr.id, outer_pr.created_at
+RETURNING pr.id, pr.created_at
 `
 
-type PruneRevisionsBeyondCountParams struct {
-	PageID pgtype.UUID `json:"page_id"`
-	Offset int32       `json:"offset"`
+type PruneSpaceRevisionsParams struct {
+	SpaceID    pgtype.UUID `json:"space_id"`
+	MaxCount   *int32      `json:"max_count"`
+	MaxAgeDays *int32      `json:"max_age_days"`
 }
 
-type PruneRevisionsBeyondCountRow struct {
+type PruneSpaceRevisionsRow struct {
 	ID        pgtype.UUID        `json:"id"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
-// Deletes revisions beyond the space's history_max_count, keeping the most
-// recent N. Returns deleted rows so the caller can log deleted_count and the
-// oldest/newest deleted_at only when this actually deletes something
-// (Decision 9) — a zero-row result must not produce a history_cleanup_logs entry.
-func (q *Queries) PruneRevisionsBeyondCount(ctx context.Context, arg PruneRevisionsBeyondCountParams) ([]PruneRevisionsBeyondCountRow, error) {
-	rows, err := q.db.Query(ctx, pruneRevisionsBeyondCount, arg.PageID, arg.Offset)
+// One space's lifecycle policy (Decision 9): a revision is deleted when it is
+// beyond the newest max_count of its page OR older than max_age_days —
+// whichever threshold is hit first. NULL means no limit on that dimension.
+// The newest revision of each page is never age-pruned, so an idle page keeps
+// its last known state (and a later save doesn't need a synthetic baseline).
+// Returns the deleted rows so the caller logs only when something was
+// actually deleted.
+func (q *Queries) PruneSpaceRevisions(ctx context.Context, arg PruneSpaceRevisionsParams) ([]PruneSpaceRevisionsRow, error) {
+	rows, err := q.db.Query(ctx, pruneSpaceRevisions, arg.SpaceID, arg.MaxCount, arg.MaxAgeDays)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []PruneRevisionsBeyondCountRow
+	var items []PruneSpaceRevisionsRow
 	for rows.Next() {
-		var i PruneRevisionsBeyondCountRow
+		var i PruneSpaceRevisionsRow
 		if err := rows.Scan(&i.ID, &i.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -440,6 +744,39 @@ func (q *Queries) SearchPages(ctx context.Context, arg SearchPagesParams) ([]Sea
 		return nil, err
 	}
 	return items, nil
+}
+
+const setPageLocked = `-- name: SetPageLocked :one
+UPDATE pages SET locked = $2, updated_at = now() WHERE id = $1
+RETURNING id, space_id, parent_id, position, title, content, search_vector, history_enabled, locked, is_template, template_key, created_by_user_id, created_by_guest_id, created_at, updated_at
+`
+
+type SetPageLockedParams struct {
+	ID     pgtype.UUID `json:"id"`
+	Locked bool        `json:"locked"`
+}
+
+func (q *Queries) SetPageLocked(ctx context.Context, arg SetPageLockedParams) (Page, error) {
+	row := q.db.QueryRow(ctx, setPageLocked, arg.ID, arg.Locked)
+	var i Page
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.ParentID,
+		&i.Position,
+		&i.Title,
+		&i.Content,
+		&i.SearchVector,
+		&i.HistoryEnabled,
+		&i.Locked,
+		&i.IsTemplate,
+		&i.TemplateKey,
+		&i.CreatedByUserID,
+		&i.CreatedByGuestID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const updatePageContent = `-- name: UpdatePageContent :one
@@ -531,4 +868,40 @@ type UpdatePageSearchVectorParams struct {
 func (q *Queries) UpdatePageSearchVector(ctx context.Context, arg UpdatePageSearchVectorParams) error {
 	_, err := q.db.Exec(ctx, updatePageSearchVector, arg.ID, arg.ToTsvector)
 	return err
+}
+
+const updatePageTitle = `-- name: UpdatePageTitle :one
+UPDATE pages SET title = $2, updated_at = now()
+WHERE id = $1
+RETURNING id, space_id, parent_id, position, title, content, search_vector, history_enabled, locked, is_template, template_key, created_by_user_id, created_by_guest_id, created_at, updated_at
+`
+
+type UpdatePageTitleParams struct {
+	ID    pgtype.UUID `json:"id"`
+	Title string      `json:"title"`
+}
+
+// Title-only rename: never touches content, so it can't clobber live
+// collaborative state (collab owns content while a doc is open).
+func (q *Queries) UpdatePageTitle(ctx context.Context, arg UpdatePageTitleParams) (Page, error) {
+	row := q.db.QueryRow(ctx, updatePageTitle, arg.ID, arg.Title)
+	var i Page
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.ParentID,
+		&i.Position,
+		&i.Title,
+		&i.Content,
+		&i.SearchVector,
+		&i.HistoryEnabled,
+		&i.Locked,
+		&i.IsTemplate,
+		&i.TemplateKey,
+		&i.CreatedByUserID,
+		&i.CreatedByGuestID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

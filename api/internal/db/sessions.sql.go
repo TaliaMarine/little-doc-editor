@@ -27,7 +27,7 @@ func (q *Queries) CreateGuestIdentity(ctx context.Context, displayName string) (
 const createGuestSession = `-- name: CreateGuestSession :one
 INSERT INTO sessions (guest_identity_id, token_hash, expires_at)
 VALUES ($1, $2, $3)
-RETURNING id, user_id, guest_identity_id, token_hash, expires_at, created_at
+RETURNING id, user_id, guest_identity_id, token_hash, expires_at, created_at, revoked_at
 `
 
 type CreateGuestSessionParams struct {
@@ -46,6 +46,7 @@ func (q *Queries) CreateGuestSession(ctx context.Context, arg CreateGuestSession
 		&i.TokenHash,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.RevokedAt,
 	)
 	return i, err
 }
@@ -53,7 +54,7 @@ func (q *Queries) CreateGuestSession(ctx context.Context, arg CreateGuestSession
 const createUserSession = `-- name: CreateUserSession :one
 INSERT INTO sessions (user_id, token_hash, expires_at)
 VALUES ($1, $2, $3)
-RETURNING id, user_id, guest_identity_id, token_hash, expires_at, created_at
+RETURNING id, user_id, guest_identity_id, token_hash, expires_at, created_at, revoked_at
 `
 
 type CreateUserSessionParams struct {
@@ -72,8 +73,21 @@ func (q *Queries) CreateUserSession(ctx context.Context, arg CreateUserSessionPa
 		&i.TokenHash,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.RevokedAt,
 	)
 	return i, err
+}
+
+const deleteExpiredSessions = `-- name: DeleteExpiredSessions :execrows
+DELETE FROM sessions WHERE expires_at < now()
+`
+
+func (q *Queries) DeleteExpiredSessions(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredSessions)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const getGuestIdentityByID = `-- name: GetGuestIdentityByID :one
@@ -85,4 +99,41 @@ func (q *Queries) GetGuestIdentityByID(ctx context.Context, id pgtype.UUID) (Gue
 	var i GuestIdentity
 	err := row.Scan(&i.ID, &i.DisplayName, &i.CreatedAt)
 	return i, err
+}
+
+const isSessionRevoked = `-- name: IsSessionRevoked :one
+SELECT EXISTS (SELECT 1 FROM sessions WHERE token_hash = $1 AND revoked_at IS NOT NULL)
+`
+
+// Deny-list lookup used by authctx.Middleware on every request.
+func (q *Queries) IsSessionRevoked(ctx context.Context, tokenHash string) (bool, error) {
+	row := q.db.QueryRow(ctx, isSessionRevoked, tokenHash)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const revokeSession = `-- name: RevokeSession :exec
+INSERT INTO sessions (user_id, guest_identity_id, token_hash, expires_at, revoked_at)
+VALUES ($1, $2, $3, $4, now())
+ON CONFLICT (token_hash) DO UPDATE SET revoked_at = COALESCE(sessions.revoked_at, now())
+`
+
+type RevokeSessionParams struct {
+	UserID          pgtype.UUID        `json:"user_id"`
+	GuestIdentityID pgtype.UUID        `json:"guest_identity_id"`
+	TokenHash       string             `json:"token_hash"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+}
+
+// Logout. Upserts so a token whose login-time row was never recorded (the
+// recording is best-effort) can still be revoked.
+func (q *Queries) RevokeSession(ctx context.Context, arg RevokeSessionParams) error {
+	_, err := q.db.Exec(ctx, revokeSession,
+		arg.UserID,
+		arg.GuestIdentityID,
+		arg.TokenHash,
+		arg.ExpiresAt,
+	)
+	return err
 }

@@ -1,7 +1,9 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { setAuthToken, setUnauthorizedHandler } from '@/api/client'
-import { login as apiLogin, getMe, type Me } from '@/api/generated'
+import { login as apiLogin, logout as apiLogout, getMe, type Me } from '@/api/generated'
+import { attachmentBlobCache } from '@/utils/attachmentBlobCache'
+import { RateLimitedError, retryAfterSeconds } from '@/utils/rateLimit'
 
 const STORAGE_KEY = 'little-doc-editor.session'
 
@@ -55,6 +57,22 @@ export const useAuthStore = defineStore('auth', () => {
     profile.value = null
     setAuthToken(null)
     persist()
+    // Authenticated attachment bytes must not outlive the session (Decision 34).
+    attachmentBlobCache.clear()
+  }
+
+  // Explicit sign-out: revoke the token server-side first (best effort — the
+  // local session is cleared whether or not the call succeeds, e.g. offline or
+  // already revoked). The 401 handler calls logout() directly instead.
+  async function signOut () {
+    const current = token.value
+    // The bearer header is passed explicitly: the request interceptor reads
+    // the module-level token lazily, which logout() below has already cleared.
+    const revoke = current
+      ? apiLogout({ headers: { Authorization: `Bearer ${current}` } }).catch(() => {})
+      : Promise.resolve()
+    logout()
+    await revoke
   }
 
   function restore () {
@@ -75,7 +93,10 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function login (email: string, password: string) {
-    const { data, error } = await apiLogin({ body: { email, password } })
+    const { data, error, response } = await apiLogin({ body: { email, password } })
+    if (response?.status === 429) {
+      throw new RateLimitedError(retryAfterSeconds(response))
+    }
     if (error) {
       throw new Error(error.error ?? 'Login failed')
     }
@@ -98,7 +119,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function loginWithToken (sessionToken: string, name: string) {
     applySession({ token: sessionToken, displayName: name, isOrgAdmin: false })
     const { data, error } = await getMe()
-    if (error || !data) {
+    if (error || !data || data.isGuest) {
       logout()
       throw new Error('Login failed')
     }
@@ -114,5 +135,5 @@ export const useAuthStore = defineStore('auth', () => {
     refreshProfile().catch(() => {})
   }
 
-  return { token, displayName, isOrgAdmin, isAuthenticated, profile, login, loginWithToken, logout, refreshProfile }
+  return { token, displayName, isOrgAdmin, isAuthenticated, profile, login, loginWithToken, logout, signOut, refreshProfile }
 })

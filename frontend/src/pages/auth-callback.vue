@@ -10,6 +10,7 @@
   import { onMounted } from 'vue'
   import { useRouter } from 'vue-router'
   import { useAuthStore } from '@/stores/auth'
+  import { safeRedirect } from '@/utils/redirect'
 
   // Landing page of the OIDC flow: the api redirects here with the session in
   // the URL fragment (#token=…&displayName=…), which never reaches a server log.
@@ -25,8 +26,10 @@
     const stored = sessionStorage.getItem('little-doc-editor.post-login')
     sessionStorage.removeItem('little-doc-editor.post-login')
     // Only same-app absolute paths are valid post-login targets (no open redirect).
-    const target = stored && stored.startsWith('/') && !stored.startsWith('//') ? stored : '/'
-    if (!token) {
+    const target = safeRedirect(stored)
+    // Only a login this browser started (login.vue sets the marker) may land
+    // here; otherwise a crafted link could swap in someone else's session.
+    if (!token || stored === null) {
       await router.replace({ path: '/login', query: { sso_error: '1' } })
       return
     }

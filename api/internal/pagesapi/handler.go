@@ -6,31 +6,60 @@
 package pagesapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authctx"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authz"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/db"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/httpx"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/revisions"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/searchindex"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/storage"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/templates"
 )
 
-type Handler struct {
-	queries *db.Queries
-	indexer *searchindex.Indexer
-	logger  *slog.Logger
+// ContentNotifier tells collab that pages.content changed outside of it, so
+// a live room can pick the new content up at once (see internal/pagesync).
+// Best-effort: callers log failures and carry on.
+type ContentNotifier interface {
+	PageContentChanged(ctx context.Context, pageID uuid.UUID) error
 }
 
-func NewHandler(queries *db.Queries, indexer *searchindex.Indexer, logger *slog.Logger) *Handler {
-	return &Handler{queries: queries, indexer: indexer, logger: logger}
+type Handler struct {
+	pool     *pgxpool.Pool
+	queries  *db.Queries
+	indexer  *searchindex.Indexer
+	recorder *revisions.Recorder
+	store    storage.Storage
+	notifier ContentNotifier
+	logger   *slog.Logger
+}
+
+// notifier may be nil (no collab notification).
+func NewHandler(pool *pgxpool.Pool, queries *db.Queries, indexer *searchindex.Indexer, recorder *revisions.Recorder, store storage.Storage, notifier ContentNotifier, logger *slog.Logger) *Handler {
+	return &Handler{pool: pool, queries: queries, indexer: indexer, recorder: recorder, store: store, notifier: notifier, logger: logger}
+}
+
+// notifyContentChanged publishes after the commit. A failure never fails the
+// request: collab then merges the change at its next store instead.
+func (h *Handler) notifyContentChanged(ctx context.Context, pageID uuid.UUID) {
+	if h.notifier == nil {
+		return
+	}
+	if err := h.notifier.PageContentChanged(ctx, pageID); err != nil {
+		h.logger.Warn("notifying collab of page content change failed", "error", err, "page_id", pageID)
+	}
 }
 
 func (h *Handler) Routes(r chi.Router) {
@@ -39,12 +68,24 @@ func (h *Handler) Routes(r chi.Router) {
 	r.Get("/pages/{pageID}", h.get)
 	r.Put("/pages/{pageID}/content", h.updateContent)
 	r.Patch("/pages/{pageID}/move", h.move)
+	r.Delete("/pages/{pageID}", h.delete)
+	r.Patch("/pages/{pageID}/lock", h.setLock)
+
+	r.Get("/page-templates", h.listTemplates)
+
+	r.Get("/pages/{pageID}/revisions", h.listRevisions)
+	r.Get("/pages/{pageID}/revisions/{revisionID}", h.getRevision)
+	r.Post("/pages/{pageID}/revisions/{revisionID}/restore", h.restoreRevision)
 }
 
 type createPageRequest struct {
 	ParentID *string         `json:"parentId"`
 	Title    string          `json:"title"`
 	Content  json.RawMessage `json:"content"`
+	// TemplateKey creates the page from a built-in template (Decision 22,
+	// GET /page-templates). Mutually exclusive with content; title defaults
+	// to the template's default title when empty.
+	TemplateKey string `json:"templateKey"`
 }
 
 // pageResponse mirrors db.Page for API responses, except Content is
@@ -170,7 +211,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.queries.GetSpaceByID(r.Context(), db.ToPgUUID(spaceID)); err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "space not found")
+		httpx.WriteLookupError(w, h.logger, err, "space not found")
 		return
 	}
 
@@ -200,7 +241,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := h.queries.GetSpaceByID(r.Context(), db.ToPgUUID(spaceID)); err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "space not found")
+		httpx.WriteLookupError(w, h.logger, err, "space not found")
 		return
 	}
 
@@ -215,11 +256,26 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
+	content := req.Content
+	if req.TemplateKey != "" {
+		tpl, ok := templates.Get(req.TemplateKey)
+		if !ok {
+			httpx.WriteError(w, http.StatusBadRequest, "unknown templateKey")
+			return
+		}
+		if len(req.Content) > 0 {
+			httpx.WriteError(w, http.StatusBadRequest, "content and templateKey are mutually exclusive")
+			return
+		}
+		content = tpl.Content
+		if req.Title == "" {
+			req.Title = tpl.DefaultTitle
+		}
+	}
 	if req.Title == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "title is required")
 		return
 	}
-	content := req.Content
 	if len(content) == 0 {
 		content = json.RawMessage("{}")
 	}
@@ -270,6 +326,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	if err := h.indexer.IndexPage(r.Context(), db.FromPgUUID(page.ID), page.Content); err != nil {
 		h.logger.Error("indexing new page failed", "error", err)
 	}
+	if err := h.recorder.Force(r.Context(), h.queries, page, authorOf(identity)); err != nil {
+		h.logger.Error("recording initial revision failed", "error", err)
+	}
 
 	httpx.WriteJSON(w, http.StatusCreated, toPageResponse(page, caps))
 }
@@ -283,7 +342,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 
 	page, err := h.queries.GetPageByID(r.Context(), db.ToPgUUID(id))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return
 	}
 
@@ -299,8 +358,13 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, toPageResponse(page, caps))
 }
 
+// updateContentRequest: both fields optional, at least one required. Omitting
+// content makes this a title-only rename that never touches page content
+// (collab owns content while a document is live, so the editor sends a
+// content-less request for renames — a content write would be treated as a
+// manual overwrite of live keystrokes).
 type updateContentRequest struct {
-	Title   string          `json:"title"`
+	Title   *string         `json:"title"`
 	Content json.RawMessage `json:"content"`
 }
 
@@ -312,7 +376,7 @@ func (h *Handler) updateContent(w http.ResponseWriter, r *http.Request) {
 	}
 	existing, err := h.queries.GetPageByID(r.Context(), db.ToPgUUID(id))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return
 	}
 
@@ -334,36 +398,87 @@ func (h *Handler) updateContent(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	if req.Title == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "title is required")
+	hasContent := len(req.Content) > 0 && string(req.Content) != "null"
+	if req.Title != nil && *req.Title == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "title must not be empty")
 		return
 	}
-	content := req.Content
-	if len(content) == 0 {
-		content = json.RawMessage("{}")
+	if req.Title == nil && !hasContent {
+		httpx.WriteError(w, http.StatusBadRequest, "title or content is required")
+		return
+	}
+	title := existing.Title
+	if req.Title != nil {
+		title = *req.Title
 	}
 
-	page, err := h.queries.UpdatePageContent(r.Context(), db.UpdatePageContentParams{
-		ID:      db.ToPgUUID(id),
-		Content: content,
-		Title:   req.Title,
-	})
+	// Content write + revision in one transaction, holding the page row lock
+	// (collab locks the pages row first too), so concurrent saves can't both
+	// record or both skip a revision and a failure can't leave content saved
+	// without its revision.
+	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
-		h.logger.Error("update page content failed", "error", err)
+		h.logger.Error("update page: begin tx failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to update page")
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := h.queries.WithTx(tx)
+
+	before, err := q.GetPageByIDForUpdate(r.Context(), db.ToPgUUID(id))
+	if err != nil {
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
+		return
+	}
+	if before.Locked { // re-checked under the lock: it may have been locked since the first read
+		httpx.WriteError(w, http.StatusForbidden, "page is locked")
+		return
+	}
+	if req.Title == nil {
+		title = before.Title
+	}
+
+	var page db.Page
+	if hasContent {
+		page, err = q.UpdatePageContent(r.Context(), db.UpdatePageContentParams{
+			ID:      db.ToPgUUID(id),
+			Content: req.Content,
+			Title:   title,
+		})
+	} else {
+		page, err = q.UpdatePageTitle(r.Context(), db.UpdatePageTitleParams{ID: db.ToPgUUID(id), Title: title})
+	}
+	if err != nil {
+		h.logger.Error("update page failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to update page")
+		return
+	}
+	if err := h.recorder.OnSave(r.Context(), q, before, page, authorOf(authctx.FromContext(r.Context()))); err != nil {
+		h.logger.Error("recording revision failed", "error", err, "page_id", id)
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to update page")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		h.logger.Error("update page: commit failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to update page")
 		return
 	}
 
-	if err := h.indexer.IndexPage(r.Context(), id, page.Content); err != nil {
-		h.logger.Error("indexing updated page failed", "error", err)
+	// Every content mutation path re-indexes (create, save, template,
+	// restore); a title-only rename leaves the indexed text unchanged.
+	if hasContent {
+		if err := h.indexer.IndexPage(r.Context(), id, page.Content); err != nil {
+			h.logger.Error("indexing updated page failed", "error", err)
+		}
+		h.notifyContentChanged(r.Context(), id)
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, toPageResponse(page, caps))
 }
 
 type moveRequest struct {
-	ParentID *string `json:"parentId"`
-	Position float64 `json:"position"`
+	ParentID *string  `json:"parentId"`
+	Position *float64 `json:"position"`
 }
 
 // move backs page-tree drag-and-drop reordering/reparenting (SPEC.md §5).
@@ -377,7 +492,7 @@ func (h *Handler) move(w http.ResponseWriter, r *http.Request) {
 	}
 	existing, err := h.queries.GetPageByID(r.Context(), db.ToPgUUID(id))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return
 	}
 
@@ -396,9 +511,15 @@ func (h *Handler) move(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	params := db.UpdatePagePositionParams{ID: db.ToPgUUID(id), Position: req.Position}
+	if req.Position == nil || math.IsNaN(*req.Position) || math.IsInf(*req.Position, 0) {
+		httpx.WriteError(w, http.StatusBadRequest, "position (a finite number) is required")
+		return
+	}
+	params := db.UpdatePagePositionParams{ID: db.ToPgUUID(id), Position: *req.Position}
+	var newParentID uuid.UUID
 	if req.ParentID != nil {
-		newParentID, ok := h.parseParentInSpace(w, r, *req.ParentID, spaceID)
+		var ok bool
+		newParentID, ok = h.parseParentInSpace(w, r, *req.ParentID, spaceID)
 		if !ok {
 			return
 		}
@@ -406,10 +527,29 @@ func (h *Handler) move(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, "a page cannot be its own parent")
 			return
 		}
+		params.ParentID = db.ToPgUUID(newParentID)
+	}
+
+	// The cycle check and the update run under the space row lock: two
+	// concurrent moves ("A under B" and "B under A") would otherwise both pass
+	// the check and commit a cycle.
+	tx, err := h.pool.Begin(r.Context())
+	if err != nil {
+		h.logger.Error("move page: begin tx failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to move page")
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+	q := h.queries.WithTx(tx)
+	if _, err := q.LockSpace(r.Context(), existing.SpaceID); err != nil {
+		httpx.WriteLookupError(w, h.logger, err, "space not found")
+		return
+	}
+	if req.ParentID != nil {
 		// A page can't be moved under one of its own descendants either —
 		// that would detach the subtree from the tree entirely (a cycle),
 		// not just reorder it.
-		descendants, err := h.queries.ListPageDescendantIDs(r.Context(), db.ToPgUUID(id))
+		descendants, err := q.ListPageDescendantIDs(r.Context(), db.ToPgUUID(id))
 		if err != nil {
 			h.logger.Error("checking descendants before move failed", "error", err)
 			httpx.WriteError(w, http.StatusInternalServerError, "failed to move page")
@@ -421,12 +561,16 @@ func (h *Handler) move(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		params.ParentID = db.ToPgUUID(newParentID)
 	}
 
-	page, err := h.queries.UpdatePagePosition(r.Context(), params)
+	page, err := q.UpdatePagePosition(r.Context(), params)
 	if err != nil {
 		h.logger.Error("move page failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to move page")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		h.logger.Error("move page: commit failed", "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "failed to move page")
 		return
 	}

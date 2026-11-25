@@ -47,6 +47,15 @@ func (q *Queries) CreateSpace(ctx context.Context, arg CreateSpaceParams) (Space
 	return i, err
 }
 
+const deleteSpace = `-- name: DeleteSpace :exec
+DELETE FROM spaces WHERE id = $1
+`
+
+func (q *Queries) DeleteSpace(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteSpace, id)
+	return err
+}
+
 const getSpaceByID = `-- name: GetSpaceByID :one
 SELECT id, name, slug, icon, history_max_count, history_max_age_days, created_at, updated_at FROM spaces WHERE id = $1
 `
@@ -88,7 +97,16 @@ func (q *Queries) GetSpaceBySlug(ctx context.Context, slug string) (Space, error
 }
 
 const getSpaceMemberRole = `-- name: GetSpaceMemberRole :one
-SELECT role FROM space_members WHERE space_id = $1 AND user_id = $2
+SELECT role FROM (
+    SELECT sm.role FROM space_members sm WHERE sm.space_id = $1 AND sm.user_id = $2
+    UNION ALL
+    SELECT sm.role
+    FROM space_members sm
+    JOIN group_members gm ON gm.group_id = sm.group_id
+    WHERE sm.space_id = $1 AND gm.user_id = $2
+) r
+ORDER BY role
+LIMIT 1
 `
 
 type GetSpaceMemberRoleParams struct {
@@ -96,6 +114,9 @@ type GetSpaceMemberRoleParams struct {
 	UserID  pgtype.UUID `json:"user_id"`
 }
 
+// Highest of the user's direct role and any role granted to a group they
+// belong to (enum order: owner first). collab/src/access.ts must use the
+// same rule.
 func (q *Queries) GetSpaceMemberRole(ctx context.Context, arg GetSpaceMemberRoleParams) (SpaceRole, error) {
 	row := q.db.QueryRow(ctx, getSpaceMemberRole, arg.SpaceID, arg.UserID)
 	var role SpaceRole
@@ -139,10 +160,17 @@ func (q *Queries) ListAllSpaces(ctx context.Context) ([]Space, error) {
 }
 
 const listSpacesForUser = `-- name: ListSpacesForUser :many
-SELECT s.id, s.name, s.slug, s.icon, s.history_max_count, s.history_max_age_days, s.created_at, s.updated_at, sm.role
+SELECT s.id, s.name, s.slug, s.icon, s.history_max_count, s.history_max_age_days, s.created_at, s.updated_at, (min(r.role))::space_role AS role
 FROM spaces s
-JOIN space_members sm ON sm.space_id = s.id
-WHERE sm.user_id = $1
+JOIN (
+    SELECT sm.space_id, sm.role FROM space_members sm WHERE sm.user_id = $1
+    UNION ALL
+    SELECT sm.space_id, sm.role
+    FROM space_members sm
+    JOIN group_members gm ON gm.group_id = sm.group_id
+    WHERE gm.user_id = $1
+) r ON r.space_id = s.id
+GROUP BY s.id
 ORDER BY s.name
 `
 
@@ -158,10 +186,10 @@ type ListSpacesForUserRow struct {
 	Role              SpaceRole          `json:"role"`
 }
 
-// Direct membership only; group-based membership is resolved by joining
-// group_members separately where needed, kept out of this query to avoid
-// silently doubling a user's effective role via both paths. Returns the
-// member's role too, so the list can report my_role without N lookups.
+// Direct and group-derived membership, at the highest role per space (the
+// space_role enum is declared owner < admin < editor < viewer, so min() is
+// the most privileged). Returns the role too, so the list can report my_role
+// without N lookups.
 func (q *Queries) ListSpacesForUser(ctx context.Context, userID pgtype.UUID) ([]ListSpacesForUserRow, error) {
 	rows, err := q.db.Query(ctx, listSpacesForUser, userID)
 	if err != nil {
@@ -190,4 +218,100 @@ func (q *Queries) ListSpacesForUser(ctx context.Context, userID pgtype.UUID) ([]
 		return nil, err
 	}
 	return items, nil
+}
+
+const listSpacesWithHistoryPolicy = `-- name: ListSpacesWithHistoryPolicy :many
+SELECT id, name, slug, icon, history_max_count, history_max_age_days, created_at, updated_at FROM spaces WHERE history_max_count IS NOT NULL OR history_max_age_days IS NOT NULL
+`
+
+func (q *Queries) ListSpacesWithHistoryPolicy(ctx context.Context) ([]Space, error) {
+	rows, err := q.db.Query(ctx, listSpacesWithHistoryPolicy)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Space
+	for rows.Next() {
+		var i Space
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Slug,
+			&i.Icon,
+			&i.HistoryMaxCount,
+			&i.HistoryMaxAgeDays,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockSpace = `-- name: LockSpace :one
+SELECT id FROM spaces WHERE id = $1 FOR UPDATE
+`
+
+// Serializes member-management changes (last-owner guard) within a transaction.
+func (q *Queries) LockSpace(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, lockSpace, id)
+	var id_2 pgtype.UUID
+	err := row.Scan(&id_2)
+	return id_2, err
+}
+
+const updateSpace = `-- name: UpdateSpace :one
+UPDATE spaces SET
+    name                 = CASE WHEN $1::boolean THEN $2::text ELSE name END,
+    icon                 = CASE WHEN $3::boolean THEN $4::text ELSE icon END,
+    history_max_count    = CASE WHEN $5::boolean THEN $6::integer ELSE history_max_count END,
+    history_max_age_days = CASE WHEN $7::boolean THEN $8::integer ELSE history_max_age_days END,
+    updated_at = now()
+WHERE id = $9
+RETURNING id, name, slug, icon, history_max_count, history_max_age_days, created_at, updated_at
+`
+
+type UpdateSpaceParams struct {
+	SetName           bool        `json:"set_name"`
+	Name              string      `json:"name"`
+	SetIcon           bool        `json:"set_icon"`
+	Icon              *string     `json:"icon"`
+	SetMaxCount       bool        `json:"set_max_count"`
+	HistoryMaxCount   *int32      `json:"history_max_count"`
+	SetMaxAge         bool        `json:"set_max_age"`
+	HistoryMaxAgeDays *int32      `json:"history_max_age_days"`
+	ID                pgtype.UUID `json:"id"`
+}
+
+// Each field is applied only when its set_* flag is true, so a PATCH can
+// distinguish "leave alone" from "set to null" (no limit).
+func (q *Queries) UpdateSpace(ctx context.Context, arg UpdateSpaceParams) (Space, error) {
+	row := q.db.QueryRow(ctx, updateSpace,
+		arg.SetName,
+		arg.Name,
+		arg.SetIcon,
+		arg.Icon,
+		arg.SetMaxCount,
+		arg.HistoryMaxCount,
+		arg.SetMaxAge,
+		arg.HistoryMaxAgeDays,
+		arg.ID,
+	)
+	var i Space
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.Icon,
+		&i.HistoryMaxCount,
+		&i.HistoryMaxAgeDays,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

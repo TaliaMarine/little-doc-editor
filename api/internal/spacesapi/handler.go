@@ -7,39 +7,49 @@ package spacesapi
 
 import (
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authctx"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authz"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/db"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/httpx"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/storage"
 )
 
 type Handler struct {
+	pool    *pgxpool.Pool
 	queries *db.Queries
+	store   storage.Storage
 	logger  *slog.Logger
 }
 
-func NewHandler(queries *db.Queries, logger *slog.Logger) *Handler {
-	return &Handler{queries: queries, logger: logger}
+func NewHandler(pool *pgxpool.Pool, queries *db.Queries, store storage.Storage, logger *slog.Logger) *Handler {
+	return &Handler{pool: pool, queries: queries, store: store, logger: logger}
 }
 
 func (h *Handler) Routes(r chi.Router) {
 	r.Post("/spaces", h.create)
 	r.Get("/spaces", h.list)
 	r.Get("/spaces/{spaceID}", h.get)
+	r.Patch("/spaces/{spaceID}", h.update)
+	r.Delete("/spaces/{spaceID}", h.delete)
 
 	r.Get("/spaces/{spaceID}/members", h.listMembers)
 	r.Post("/spaces/{spaceID}/members", h.addMember)
 	r.Patch("/spaces/{spaceID}/members/{userID}", h.updateMember)
 	r.Delete("/spaces/{spaceID}/members/{userID}", h.removeMember)
+	r.Get("/spaces/{spaceID}/member-candidates", h.memberCandidates)
+
+	r.Post("/spaces/{spaceID}/group-members", h.addGroupMember)
+	r.Patch("/spaces/{spaceID}/group-members/{groupID}", h.updateGroupMember)
+	r.Delete("/spaces/{spaceID}/group-members/{groupID}", h.removeGroupMember)
+	r.Get("/spaces/{spaceID}/group-candidates", h.groupCandidates)
 }
 
 // spaceResponse, spaceMemberResponse, and spaceMemberListItemResponse are
@@ -100,6 +110,7 @@ type spaceMemberListItemResponse struct {
 	spaceMemberResponse
 	UserEmail       *string `json:"user_email"`
 	UserDisplayName *string `json:"user_display_name"`
+	GroupName       *string `json:"group_name"`
 }
 
 type createSpaceRequest struct {
@@ -190,133 +201,10 @@ func (h *Handler) listMembers(w http.ResponseWriter, r *http.Request) {
 			},
 			UserEmail:       m.UserEmail,
 			UserDisplayName: m.UserDisplayName,
+			GroupName:       m.GroupName,
 		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, items)
-}
-
-type addMemberRequest struct {
-	UserID string `json:"userId"`
-	Role   string `json:"role"`
-}
-
-func (h *Handler) addMember(w http.ResponseWriter, r *http.Request) {
-	spaceID, err := uuid.Parse(chi.URLParam(r, "spaceID"))
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid space id")
-		return
-	}
-	identity := authctx.FromContext(r.Context())
-	if !authz.RequireSpaceRole(r.Context(), w, h.queries, identity, spaceID, authz.RoleAdmin) {
-		return
-	}
-
-	var req addMemberRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
-		return
-	}
-	userID, err := uuid.Parse(req.UserID)
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid userId")
-		return
-	}
-	role, ok := parseSpaceRole(req.Role)
-	if !ok {
-		httpx.WriteError(w, http.StatusBadRequest, "role must be one of owner, admin, editor, viewer")
-		return
-	}
-
-	member, err := h.queries.AddSpaceMemberUser(r.Context(), db.AddSpaceMemberUserParams{
-		SpaceID: db.ToPgUUID(spaceID),
-		UserID:  db.ToPgUUID(userID),
-		Role:    role,
-	})
-	if err != nil {
-		if db.IsForeignKeyViolation(err) {
-			httpx.WriteError(w, http.StatusNotFound, "space or user not found")
-			return
-		}
-		h.logger.Error("add space member failed", "error", err)
-		httpx.WriteError(w, http.StatusInternalServerError, "failed to add member")
-		return
-	}
-	httpx.WriteJSON(w, http.StatusCreated, toSpaceMemberResponse(member))
-}
-
-type updateMemberRequest struct {
-	Role string `json:"role"`
-}
-
-func (h *Handler) updateMember(w http.ResponseWriter, r *http.Request) {
-	spaceID, err := uuid.Parse(chi.URLParam(r, "spaceID"))
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid space id")
-		return
-	}
-	memberUserID, err := uuid.Parse(chi.URLParam(r, "userID"))
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid user id")
-		return
-	}
-	identity := authctx.FromContext(r.Context())
-	if !authz.RequireSpaceRole(r.Context(), w, h.queries, identity, spaceID, authz.RoleAdmin) {
-		return
-	}
-
-	var req updateMemberRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
-		return
-	}
-	role, ok := parseSpaceRole(req.Role)
-	if !ok {
-		httpx.WriteError(w, http.StatusBadRequest, "role must be one of owner, admin, editor, viewer")
-		return
-	}
-
-	member, err := h.queries.UpdateSpaceMemberRole(r.Context(), db.UpdateSpaceMemberRoleParams{
-		SpaceID: db.ToPgUUID(spaceID),
-		UserID:  db.ToPgUUID(memberUserID),
-		Role:    role,
-	})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			httpx.WriteError(w, http.StatusNotFound, "user is not a member of this space")
-			return
-		}
-		h.logger.Error("update space member role failed", "error", err)
-		httpx.WriteError(w, http.StatusInternalServerError, "failed to update member")
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, toSpaceMemberResponse(member))
-}
-
-func (h *Handler) removeMember(w http.ResponseWriter, r *http.Request) {
-	spaceID, err := uuid.Parse(chi.URLParam(r, "spaceID"))
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid space id")
-		return
-	}
-	memberUserID, err := uuid.Parse(chi.URLParam(r, "userID"))
-	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid user id")
-		return
-	}
-	identity := authctx.FromContext(r.Context())
-	if !authz.RequireSpaceRole(r.Context(), w, h.queries, identity, spaceID, authz.RoleAdmin) {
-		return
-	}
-
-	if err := h.queries.RemoveSpaceMemberUser(r.Context(), db.RemoveSpaceMemberUserParams{
-		SpaceID: db.ToPgUUID(spaceID),
-		UserID:  db.ToPgUUID(memberUserID),
-	}); err != nil {
-		h.logger.Error("remove space member failed", "error", err)
-		httpx.WriteError(w, http.StatusInternalServerError, "failed to remove member")
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func parseSpaceRole(s string) (db.SpaceRole, bool) {
@@ -411,7 +299,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 
 	space, err := h.queries.GetSpaceByID(r.Context(), db.ToPgUUID(id))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "space not found")
+		httpx.WriteLookupError(w, h.logger, err, "space not found")
 		return
 	}
 

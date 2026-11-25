@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"golang.org/x/oauth2"
 
 	"github.com/TaliaMarine/little-doc-editor/api/internal/config"
@@ -138,7 +139,7 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	if e := r.URL.Query().Get("error"); e != "" {
 		h.logger.Warn("oidc provider returned an error", "error", e, "description", r.URL.Query().Get("error_description"))
 		http.SetCookie(w, &http.Cookie{Name: flowCookieName, Value: "", MaxAge: -1, Path: "/", HttpOnly: true, Secure: h.secureCookies(r)})
-		http.Redirect(w, r, h.loginErrorURL(), http.StatusFound)
+		http.Redirect(w, r, h.loginErrorURL("provider_error"), http.StatusFound)
 		return
 	}
 	cookie, err := r.Cookie(flowCookieName)
@@ -196,7 +197,7 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, errEmailTaken) {
 			h.logger.Warn("oidc login refused: email belongs to another account", "email", profile.Email)
-			http.Redirect(w, r, h.loginErrorURL(), http.StatusFound)
+			http.Redirect(w, r, h.loginErrorURL("email_taken"), http.StatusFound)
 			return
 		}
 		h.logger.Error("oidc JIT provisioning failed", "error", err)
@@ -229,13 +230,17 @@ func (h *Handler) callback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, h.postLoginURL()+"#"+frag.Encode(), http.StatusFound)
 }
 
-// loginErrorURL is the SPA login page with the SSO-failed flag set.
-func (h *Handler) loginErrorURL() string {
+// loginErrorURL is the SPA login page with the SSO-failed flag set
+// (sso_error=1) and a machine-readable reason: "email_taken" (the IdP email
+// belongs to a different, un-linked account — see jitProvision) or
+// "provider_error".
+func (h *Handler) loginErrorURL(reason string) string {
+	q := url.Values{"sso_error": {"1"}, "reason": {reason}}.Encode()
 	u, err := url.Parse(h.postLoginURL())
 	if err != nil {
-		return "/login?sso_error=1"
+		return "/login?" + q
 	}
-	u.Path, u.RawQuery, u.Fragment = "/login", "sso_error=1", ""
+	u.Path, u.RawQuery, u.Fragment = "/login", q, ""
 	return u.String()
 }
 
@@ -268,6 +273,17 @@ func (h *Handler) profileFromClaims(subject string, c map[string]any) profile {
 		Username:  str("preferred_username"),
 		AvatarURL: str("picture"),
 	}
+	// An email the IdP says it has NOT verified is attacker-chosen text: never
+	// store it as the account's email (it would squat that address, e.g. block
+	// an invite to the real owner). Fall through to the placeholder below.
+	// A missing claim is trusted: several IdPs omit email_verified.
+	unverifiedEmail := false
+	switch v := c["email_verified"].(type) {
+	case bool:
+		unverifiedEmail = !v
+	case string:
+		unverifiedEmail = strings.EqualFold(v, "false")
+	}
 	if raw, ok := c[h.cfg.OIDCGroupsClaim].([]any); ok {
 		for _, g := range raw {
 			if name, ok := g.(string); ok && name != "" {
@@ -284,6 +300,9 @@ func (h *Handler) profileFromClaims(subject string, c map[string]any) profile {
 			p.DisplayName = cand
 			break
 		}
+	}
+	if unverifiedEmail {
+		p.Email = ""
 	}
 	if p.Email == "" {
 		// users.email is NOT NULL UNIQUE; synthesize a stable placeholder.
@@ -326,6 +345,9 @@ func (h *Handler) jitProvision(ctx context.Context, issuer, subject string, p pr
 	if err != nil {
 		return db.User{}, err
 	}
+	if err := h.syncGroups(ctx, user.ID, p.Groups); err != nil {
+		return db.User{}, err
+	}
 	return h.queries.UpdateOIDCUserProfile(ctx, db.UpdateOIDCUserProfileParams{
 		ID:          user.ID,
 		DisplayName: p.DisplayName,
@@ -334,6 +356,25 @@ func (h *Handler) jitProvision(ctx context.Context, issuer, subject string, p pr
 		IdpGroups:   p.Groups,
 		IsOrgAdmin:  p.IsAdmin,
 	})
+}
+
+const (
+	maxGroups        = 200
+	maxGroupNameSize = 200
+)
+
+// syncGroups mirrors the IdP's group claim into groups/group_members on every
+// login: unknown groups are created, memberships the IdP no longer reports are
+// dropped. Space roles granted to a group (space_members.group_id) then apply
+// to its members (api GetSpaceMemberRole; collab access.ts must do the same).
+func (h *Handler) syncGroups(ctx context.Context, userID pgtype.UUID, groups []string) error {
+	names := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if g = strings.TrimSpace(g); g != "" && len(g) <= maxGroupNameSize && len(names) < maxGroups {
+			names = append(names, g)
+		}
+	}
+	return h.queries.SyncUserGroups(ctx, db.SyncUserGroupsParams{Names: names, UserID: userID})
 }
 
 func nilIfEmpty(s string) *string {

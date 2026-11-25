@@ -1,6 +1,6 @@
 # Developer guide
 
-How to run little-doc-editor locally. See [SPEC.md](./SPEC.md) for what the system is supposed to do, and [README.md](./README.md) for the high-level architecture.
+How to run little-doc-editor locally. See [SPEC.md](./SPEC.md) for what the system is supposed to do, and [ARCHITECTURE.md](./ARCHITECTURE.md) for how it's built (and [README.md](./README.md) for what it does and how to deploy it).
 
 ## Prerequisites
 
@@ -155,6 +155,31 @@ curl -X POST localhost:8080/api/v1/pages/$PAGE_ID/attachments -F "file=@/path/to
 
 The response's `content_type` is the *sniffed* type, not whatever the client sent. You can also browse uploaded objects directly in the MinIO console at `localhost:9001`.
 
+## Demo data and screenshots
+
+README screenshots are generated, not hand-taken. Two scripts (plain Node ESM, no build step; Node 24+) drive a real stack:
+
+- `scripts/seed-demo/` fills a running api with **fictional** data **through the REST API only**: four users created via invite + redemption, one invite left pending, three spaces with members at different space roles, a nested page tree with realistic content (including a Mermaid block and a page with several revisions by different authors), a generated PNG (inline image) and PDF, and a view share link. It is safe to re-run: it looks up users by email, spaces by slug, pages by title under the same parent, and share links per page, and skips what exists, never overwriting page content edited since. To start over, drop and recreate the demo database.
+- `scripts/screenshots/` (Playwright, Chromium) logs in as the seeded users via the API, injects the session, and writes `docs/screenshots/*.png` at a fixed 1440x900 viewport. The live-collaboration shot uses two browser contexts (an admin and a second user on the same page). It exits non-zero if the seed data is missing or a feature does not render.
+
+Both need **real auth** (the bypass makes every request an admin, so roles cannot be shown), the api's rate limiting off (many logins in a minute), and `HISTORY_REVISION_DEBOUNCE=0` so the seed's saves become history entries. The `demo-*` recipes set all of that against a separate `lde_demo` database (override the name with `DEMO_DB=...`), so they never touch your dev data. Stop `just api` first (same port), then:
+
+```sh
+just up                  # Postgres, Redis, MinIO
+just demo-migrate        # creates + migrates the lde_demo database
+just demo-api            # terminal 1: api on :8080, real auth, admin@demo.example / demo-admin-password
+just demo-collab         # terminal 2: collab on :1234
+just frontend            # terminal 3: SPA on :3000
+just demo-seed           # fictional data
+just screenshots         # installs Playwright + Chromium on first use, then regenerates docs/screenshots/
+```
+
+(`make demo-migrate demo-api demo-collab demo-seed screenshots` are equivalent.) `just screenshots` shrinks the PNGs with `pngquant` when it is installed (`brew install pngquant`). Look at every PNG before committing: a login screen, blank page or error banner where a feature should be is a failure. Re-run `just screenshots` whenever the UI changes noticeably.
+
+To aim the scripts at a stack on other ports or credentials, set `DEMO_API_URL` (default `http://localhost:8080/api/v1`, used by both scripts), `SHOT_BASE_URL` (the SPA, default `http://localhost:3000`), `DEMO_ADMIN_EMAIL`/`DEMO_ADMIN_PASSWORD` (the api's `BOOTSTRAP_ADMIN_*`) and `DEMO_USER_PASSWORD`. For example, a second stack on api `:18080` and the dev server started with `LDE_API_PROXY=http://localhost:18080 VITE_COLLAB_URL=ws://localhost:11234 npx vite --port 13000` uses `DEMO_API_URL=http://localhost:18080/api/v1 SHOT_BASE_URL=http://localhost:13000`.
+
+Language screenshots are not taken because only English ships.
+
 ## Running the full test suite
 
 ```sh
@@ -164,6 +189,10 @@ just lint              # go vet + frontend eslint/type-check + collab tsc
 ```
 
 Per-service equivalents (if you'd rather work in one service's directory): see `api/README.md`, `frontend/README.md`, `collab/README.md`.
+
+## Frontend runtime config and CSP
+
+Production SPA config is runtime, not build-time: the nginx image's `docker/40-lde-config.sh` turns `API_BASE_URL` / `COLLAB_URL` env into `/config.js` and the CSP header. Test it locally with `docker build -t lde-fe frontend && docker run -p 8080:8080 -e API_BASE_URL=... lde-fe` and watch the browser console for CSP violations. In dev (`vite`) `public/config.js` is an empty stub and the `VITE_*` vars apply. See `frontend/README.md`.
 
 ## Helm chart
 

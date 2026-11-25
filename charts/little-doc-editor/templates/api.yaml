@@ -6,6 +6,9 @@ metadata:
     {{- include "little-doc-editor.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
+  {{- if and .Values.api.metrics.enabled (eq (int .Values.api.metrics.port) (int .Values.api.service.port)) }}
+  {{- fail "api.metrics.port must differ from api.service.port" }}
+  {{- end }}
   replicas: {{ .Values.api.replicaCount }}
   {{- if eq .Values.storage.backend "filesystem" }}
   strategy:
@@ -33,17 +36,55 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.api.service.port }}
+            {{- if .Values.api.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.api.metrics.port }}
+            {{- end }}
           env:
             - name: HTTP_ADDR
               value: ":{{ .Values.api.service.port }}"
             - name: LOG_LEVEL
               value: {{ .Values.api.logLevel | quote }}
+            {{- if and .Values.api.internalLoginBreakGlass (not .Values.bootstrapAdmin.email) }}
+            {{- fail "api.internalLoginBreakGlass restores login for the bootstrap admin only, so bootstrapAdmin.email must be set" }}
+            {{- end }}
             - name: INTERNAL_LOGIN_BREAK_GLASS
               value: {{ .Values.api.internalLoginBreakGlass | quote }}
             - name: SESSION_TTL
               value: {{ .Values.sessionJWT.ttl | quote }}
             - name: REDIS_ADDR
               value: {{ .Values.redis.addr | quote }}
+            {{- with .Values.redis.username }}
+            - name: REDIS_USERNAME
+              value: {{ . | quote }}
+            {{- end }}
+            - name: REDIS_TLS
+              value: {{ .Values.redis.tls | quote }}
+            {{- if or .Values.redis.auth.value .Values.redis.auth.existingSecret.name }}
+            {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "REDIS_PASSWORD" "field" .Values.redis.auth "generatedKey" "redis-auth") | nindent 12 }}
+            {{- end }}
+            - name: HISTORY_CLEANUP_SCHEDULE
+              value: {{ .Values.api.historyCleanupSchedule | quote }}
+            - name: HISTORY_REVISION_DEBOUNCE
+              value: {{ .Values.api.revisionDebounce | quote }}
+            {{- with .Values.api.trustedProxies }}
+            - name: TRUSTED_PROXIES
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with include "little-doc-editor.apiCorsOrigins" . }}
+            - name: CORS_ALLOWED_ORIGINS
+              value: {{ . | quote }}
+            {{- end }}
+            - name: RATE_LIMIT_ENABLED
+              value: {{ .Values.api.rateLimit.enabled | quote }}
+            - name: RATE_LIMIT_LOGIN_PER_MINUTE
+              value: {{ .Values.api.rateLimit.loginPerMinute | int | toString | quote }}
+            - name: RATE_LIMIT_PUBLIC_PER_MINUTE
+              value: {{ .Values.api.rateLimit.publicPerMinute | int | toString | quote }}
+            {{- if .Values.api.metrics.enabled }}
+            - name: METRICS_ADDR
+              value: ":{{ .Values.api.metrics.port }}"
+            {{- end }}
             {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "DATABASE_URL" "field" .Values.postgres.dsn "generatedKey" "postgres-dsn") | nindent 12 }}
             {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "SESSION_JWT_SECRET" "field" .Values.sessionJWT "generatedKey" "session-jwt-secret") | nindent 12 }}
             {{- if .Values.bootstrapAdmin.email }}
@@ -104,6 +145,8 @@ spec:
             {{- if .Values.observability.otel.enabled }}
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: {{ .Values.observability.otel.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .Values.observability.otel.protocol | quote }}
             {{- end }}
           livenessProbe:
             httpGet:
@@ -145,3 +188,8 @@ spec:
     - name: http
       port: {{ .Values.api.service.port }}
       targetPort: http
+    {{- if .Values.api.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.api.metrics.port }}
+      targetPort: metrics
+    {{- end }}

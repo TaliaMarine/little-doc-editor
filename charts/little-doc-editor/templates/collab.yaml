@@ -29,15 +29,35 @@ spec:
           ports:
             - name: ws
               containerPort: {{ .Values.collab.service.port }}
+            {{- if .Values.collab.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.collab.metrics.port }}
+            {{- end }}
           env:
             - name: PORT
               value: {{ .Values.collab.service.port | quote }}
+            - name: HISTORY_REVISION_DEBOUNCE
+              value: {{ .Values.api.revisionDebounce | quote }}
+            {{- if .Values.collab.metrics.enabled }}
+            - name: METRICS_PORT
+              value: {{ .Values.collab.metrics.port | quote }}
+            {{- end }}
+            {{- with include "little-doc-editor.collabAllowedOrigins" . }}
+            - name: COLLAB_ALLOWED_ORIGINS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.defaultMemberRole }}
             - name: DEFAULT_MEMBER_ROLE
               value: {{ . | quote }}
             {{- end }}
             - name: REDIS_ADDR
               value: {{ .Values.redis.addr | quote }}
+            {{- with .Values.redis.username }}
+            - name: REDIS_USERNAME
+              value: {{ . | quote }}
+            {{- end }}
+            - name: REDIS_TLS
+              value: {{ .Values.redis.tls | quote }}
             {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "DATABASE_URL" "field" .Values.postgres.dsn "generatedKey" "postgres-dsn") | nindent 12 }}
             {{- include "little-doc-editor.secretEnvVar" (dict "root" $ "name" "SESSION_JWT_SECRET" "field" .Values.sessionJWT "generatedKey" "session-jwt-secret") | nindent 12 }}
             {{- if or .Values.redis.auth.value .Values.redis.auth.existingSecret.name }}
@@ -71,3 +91,8 @@ spec:
     - name: ws
       port: {{ .Values.collab.service.port }}
       targetPort: ws
+    {{- if .Values.collab.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.collab.metrics.port }}
+      targetPort: metrics
+    {{- end }}

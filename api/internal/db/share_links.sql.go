@@ -130,7 +130,7 @@ func (q *Queries) GetShareLinkByToken(ctx context.Context, token string) (ShareL
 const listPageDescendantIDs = `-- name: ListPageDescendantIDs :many
 WITH RECURSIVE descendants AS (
     SELECT root.id AS id FROM pages root WHERE root.id = $1
-    UNION ALL
+    UNION
     SELECT child.id AS id FROM pages child
     JOIN descendants d ON child.parent_id = d.id
 )
@@ -162,18 +162,45 @@ func (q *Queries) ListPageDescendantIDs(ctx context.Context, id pgtype.UUID) ([]
 }
 
 const listShareLinkAccessLogs = `-- name: ListShareLinkAccessLogs :many
-SELECT id, share_link_id, accessed_at, ip_hash, user_agent, viewer_user_id, viewer_guest_id FROM share_link_access_logs WHERE share_link_id = $1 ORDER BY accessed_at DESC
+SELECT l.id, l.share_link_id, l.accessed_at, l.ip_hash, l.user_agent,
+       l.viewer_user_id, l.viewer_guest_id,
+       u.display_name AS viewer_user_display_name,
+       g.display_name AS viewer_guest_display_name
+FROM share_link_access_logs l
+LEFT JOIN users u ON u.id = l.viewer_user_id
+LEFT JOIN guest_identities g ON g.id = l.viewer_guest_id
+WHERE l.share_link_id = $1
+ORDER BY l.accessed_at DESC, l.id DESC
+LIMIT $2 OFFSET $3
 `
 
-func (q *Queries) ListShareLinkAccessLogs(ctx context.Context, shareLinkID pgtype.UUID) ([]ShareLinkAccessLog, error) {
-	rows, err := q.db.Query(ctx, listShareLinkAccessLogs, shareLinkID)
+type ListShareLinkAccessLogsParams struct {
+	ShareLinkID pgtype.UUID `json:"share_link_id"`
+	Limit       int32       `json:"limit"`
+	Offset      int32       `json:"offset"`
+}
+
+type ListShareLinkAccessLogsRow struct {
+	ID                     pgtype.UUID        `json:"id"`
+	ShareLinkID            pgtype.UUID        `json:"share_link_id"`
+	AccessedAt             pgtype.Timestamptz `json:"accessed_at"`
+	IpHash                 string             `json:"ip_hash"`
+	UserAgent              *string            `json:"user_agent"`
+	ViewerUserID           pgtype.UUID        `json:"viewer_user_id"`
+	ViewerGuestID          pgtype.UUID        `json:"viewer_guest_id"`
+	ViewerUserDisplayName  *string            `json:"viewer_user_display_name"`
+	ViewerGuestDisplayName *string            `json:"viewer_guest_display_name"`
+}
+
+func (q *Queries) ListShareLinkAccessLogs(ctx context.Context, arg ListShareLinkAccessLogsParams) ([]ListShareLinkAccessLogsRow, error) {
+	rows, err := q.db.Query(ctx, listShareLinkAccessLogs, arg.ShareLinkID, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ShareLinkAccessLog
+	var items []ListShareLinkAccessLogsRow
 	for rows.Next() {
-		var i ShareLinkAccessLog
+		var i ListShareLinkAccessLogsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ShareLinkID,
@@ -182,6 +209,8 @@ func (q *Queries) ListShareLinkAccessLogs(ctx context.Context, shareLinkID pgtyp
 			&i.UserAgent,
 			&i.ViewerUserID,
 			&i.ViewerGuestID,
+			&i.ViewerUserDisplayName,
+			&i.ViewerGuestDisplayName,
 		); err != nil {
 			return nil, err
 		}

@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -31,6 +32,30 @@ var defaultParams = params{
 	keyLength:   32,
 }
 
+// work bounds how many argon2id computations run at once, process-wide. Each
+// one allocates `memory` KiB (64 MiB by default); without a cap a burst of
+// concurrent logins/redemptions from a few clients could exhaust the pod's
+// memory even though each client stays under the per-IP rate limit. Excess
+// callers queue (their requests are bounded by the server timeout).
+var work = make(chan struct{}, maxConcurrent())
+
+func maxConcurrent() int {
+	n := runtime.GOMAXPROCS(0)
+	if n < 2 {
+		n = 2
+	}
+	if n > 8 {
+		n = 8
+	}
+	return n
+}
+
+func derive(password string, salt []byte, p params) []byte {
+	work <- struct{}{}
+	defer func() { <-work }()
+	return argon2.IDKey([]byte(password), salt, p.iterations, p.memory, p.parallelism, p.keyLength)
+}
+
 var ErrMismatchedHashFormat = errors.New("passwordhash: unrecognized hash format")
 
 func Hash(password string) (string, error) {
@@ -41,7 +66,7 @@ func Hash(password string) (string, error) {
 		return "", fmt.Errorf("generating salt: %w", err)
 	}
 
-	key := argon2.IDKey([]byte(password), salt, p.iterations, p.memory, p.parallelism, p.keyLength)
+	key := derive(password, salt, p)
 
 	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s",
 		p.memory, p.iterations, p.parallelism,
@@ -59,7 +84,7 @@ func Verify(password, encodedHash string) (bool, error) {
 		return false, err
 	}
 
-	candidate := argon2.IDKey([]byte(password), salt, p.iterations, p.memory, p.parallelism, p.keyLength)
+	candidate := derive(password, salt, p)
 	return subtle.ConstantTimeCompare(candidate, key) == 1, nil
 }
 

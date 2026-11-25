@@ -21,7 +21,16 @@ VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: ListShareLinkAccessLogs :many
-SELECT * FROM share_link_access_logs WHERE share_link_id = $1 ORDER BY accessed_at DESC;
+SELECT l.id, l.share_link_id, l.accessed_at, l.ip_hash, l.user_agent,
+       l.viewer_user_id, l.viewer_guest_id,
+       u.display_name AS viewer_user_display_name,
+       g.display_name AS viewer_guest_display_name
+FROM share_link_access_logs l
+LEFT JOIN users u ON u.id = l.viewer_user_id
+LEFT JOIN guest_identities g ON g.id = l.viewer_guest_id
+WHERE l.share_link_id = $1
+ORDER BY l.accessed_at DESC, l.id DESC
+LIMIT $2 OFFSET $3;
 
 -- name: ListPageDescendantIDs :many
 -- Share-link scope defaults to the page and its descendants (Decision 21).
@@ -30,7 +39,7 @@ SELECT * FROM share_link_access_logs WHERE share_link_id = $1 ORDER BY accessed_
 -- ever has pathologically deep trees.
 WITH RECURSIVE descendants AS (
     SELECT root.id AS id FROM pages root WHERE root.id = $1
-    UNION ALL
+    UNION
     SELECT child.id AS id FROM pages child
     JOIN descendants d ON child.parent_id = d.id
 )

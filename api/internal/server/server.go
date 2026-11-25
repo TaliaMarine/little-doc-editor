@@ -13,19 +13,27 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/TaliaMarine/little-doc-editor/api/internal/accountsapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/adminapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/attachments"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authctx"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/clientip"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/config"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/cors"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/db"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/exportapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/oidcapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/pagesapi"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/pagesync"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/ratelimit"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/revisions"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/searchapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/searchindex"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/shareapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/spacesapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/storage"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/telemetry"
 )
 
 // New builds the chi router with all api routes registered. oidcHandler is
@@ -39,9 +47,28 @@ func New(logger *slog.Logger, pool *pgxpool.Pool, store storage.Storage, oidcHan
 	indexer := searchindex.NewIndexer(queries)
 	querier := searchindex.NewQuerier(queries)
 
-	authHandler := authapi.NewHandler(queries, cfg, logger)
-	shareHandler := shareapi.NewHandler(queries, cfg, logger)
+	ips, _ := clientip.New(cfg.TrustedProxies) // validated by config.Load
+	limiter := ratelimit.New(cfg.RateLimitEnabled, ratelimit.RedisOptions{Addr: cfg.RedisAddr, Username: cfg.RedisUsername, Password: cfg.RedisPassword, TLS: cfg.RedisTLS, DB: cfg.RedisDB}, ips, logger)
+	recorder := revisions.NewRecorder(cfg.RevisionDebounce)
+	// A nil *Notifier (no REDIS_ADDR) is a valid no-op; the typed nil must
+	// not reach the interface, hence the explicit branch.
+	var contentNotifier pagesapi.ContentNotifier
+	// (Redis pub/sub is database-independent, so cfg.RedisDB isn't passed here.)
+	if n := pagesync.New(pagesync.Options{Addr: cfg.RedisAddr, Username: cfg.RedisUsername, Password: cfg.RedisPassword, TLS: cfg.RedisTLS}); n != nil {
+		contentNotifier = n
+	} else {
+		logger.Info("REDIS_ADDR unset: collab is not notified of restores/content PUTs (applied at its next store)")
+	}
 
+	authHandler := authapi.NewHandler(queries, cfg, logger, limiter)
+	shareHandler := shareapi.NewHandler(queries, cfg, logger, ips, limiter)
+	accountsHandler := accountsapi.NewHandler(pool, queries, cfg, logger)
+
+	r.Use(telemetry.Middleware(redactPath))
+	// Opt-in (CORS_ALLOWED_ORIGINS); ahead of routing/auth/rate limiting, so
+	// preflights never need a session and 401/429 responses still carry the
+	// headers the browser needs to read them.
+	r.Use(cors.Middleware(cfg.CORSAllowedOrigins))
 	r.Use(middleware.RequestID)
 	r.Use(slogRequestLogger(logger))
 	r.Use(middleware.Recoverer)
@@ -51,21 +78,39 @@ func New(logger *slog.Logger, pool *pgxpool.Pool, store storage.Storage, oidcHan
 	r.Get("/readyz", handleReadyz(pool))
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// No session required — these are how one is obtained.
-		authHandler.PublicRoutes(r)
-		shareHandler.PublicRoutes(r)
-		oidcHandler.PublicRoutes(r)
+		// No session required — these are how one is obtained. Each class is
+		// rate limited per client IP under its own counter (SPEC.md §8):
+		// every login/redeem costs an argon2id hash or writes rows.
+		perMinute := time.Minute
+		r.Group(func(r chi.Router) {
+			r.Use(limiter.Middleware("login", cfg.RateLimitLoginPerMinute, perMinute))
+			authHandler.PublicRoutes(r)
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(limiter.Middleware("share", cfg.RateLimitPublicPerMinute, perMinute))
+			shareHandler.PublicRoutes(r)
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(limiter.Middleware("invite", cfg.RateLimitPublicPerMinute, perMinute))
+			accountsHandler.PublicRoutes(r)
+		})
+		r.Group(func(r chi.Router) {
+			r.Use(limiter.Middleware("oidc", cfg.RateLimitPublicPerMinute, perMinute))
+			oidcHandler.PublicRoutes(r)
+		})
 
 		r.Group(func(r chi.Router) {
 			r.Use(authctx.Middleware(cfg.DevAuthBypass, cfg.SessionJWTSecret, queries, logger))
 
 			authHandler.PrivateRoutes(r)
 			shareHandler.PrivateRoutes(r)
-			spacesapi.NewHandler(queries, logger).Routes(r)
-			pagesapi.NewHandler(queries, indexer, logger).Routes(r)
+			accountsHandler.PrivateRoutes(r)
+			spacesapi.NewHandler(pool, queries, store, logger).Routes(r)
+			pagesapi.NewHandler(pool, queries, indexer, recorder, store, contentNotifier, logger).Routes(r)
 			attachments.NewHandler(queries, store, cfg, logger).Routes(r)
+			exportapi.NewHandler(queries, store, logger).Routes(r)
 			searchapi.NewHandler(queries, querier, logger).Routes(r)
-			adminapi.NewHandler(queries, logger).Routes(r)
+			adminapi.NewHandler(queries, cfg, logger).Routes(r)
 		})
 	})
 
@@ -106,11 +151,13 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 // /api/v1/share/{token} is a bearer credential (anyone holding a
 // password-less link can redeem it), so log the route pattern instead.
 func redactPath(r *http.Request) string {
-	if strings.HasPrefix(r.URL.Path, "/api/v1/share/") {
-		if rc := chi.RouteContext(r.Context()); rc != nil && rc.RoutePattern() != "" {
-			return rc.RoutePattern()
+	for _, prefix := range []string{"/api/v1/share/", "/api/v1/invites/"} {
+		if strings.HasPrefix(r.URL.Path, prefix) && r.URL.Path != "/api/v1/invites/" {
+			if rc := chi.RouteContext(r.Context()); rc != nil && rc.RoutePattern() != "" {
+				return rc.RoutePattern()
+			}
+			return prefix + "[redacted]"
 		}
-		return "/api/v1/share/[redacted]"
 	}
 	return r.URL.Path
 }

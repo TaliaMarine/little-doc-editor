@@ -22,8 +22,14 @@ postgres:
 # --- External Redis (Decisions 3, 20, 29: bring-your-own, collab fan-out + shared session/presence state) ---
 redis:
   addr: ""   # host:port, not secret-shaped
-  # Redis AUTH password, passed to collab (the only service that talks to
-  # Redis) as REDIS_PASSWORD. Leave empty for a Redis without auth.
+  # ACL username (REDIS_USERNAME) for api and collab; empty = the default user.
+  username: ""
+  # Connect with TLS (REDIS_TLS) — set true for managed Redis that requires it.
+  tls: false
+  # Redis AUTH password, passed to collab (fan-out) and api (shared rate
+  # limiter) as REDIS_PASSWORD. Leave empty for a Redis without auth.
+  # (collab also accepts REDIS_URL / rediss://, but this chart only wires the
+  # discrete addr/username/tls/auth fields.)
   auth:
     value: ""
     existingSecret:
@@ -148,7 +154,40 @@ api:
     maxSizeBytes: 26214400   # 25MB
   # Break-glass path to re-enable internal login if OIDC misconfigures
   # (Decision 14) — an env var/CLI flag on the pod, never a DB-only toggle.
+  # Restores password login for the BOOTSTRAP ADMIN ONLY (bootstrapAdmin.email,
+  # which must therefore be set) — other internal accounts stay blocked.
   internalLoginBreakGlass: false
+  # In-process history cleanup job (Decisions 9, 28): standard 5-field cron,
+  # "@daily" / "@every 6h", or "off". Several replicas are fine — a Postgres
+  # advisory lock lets one run per tick. The schedule is validated at startup.
+  historyCleanupSchedule: "0 3 * * *"
+  # Minimum gap between two auto-created revisions of a page by the same author.
+  revisionDebounce: 5m
+  # Reverse proxies whose X-Forwarded-For is trusted (CIDRs or IPs), used for
+  # rate limiting and the hashed share-link access-log IP. Set this to your
+  # ingress controller / gateway pod CIDR; empty (default) ignores the header,
+  # which makes every client look like the ingress.
+  trustedProxies: []
+  # Browser origins allowed to call the api cross-origin (CORS_ALLOWED_ORIGINS;
+  # exact origins like https://docs.example.com, never "*"; no cookies are
+  # involved, the api uses a bearer token). Empty (default) = derived: the
+  # frontend origin(s) from ingress.frontend.host / gatewayApi.frontend.hostnames
+  # when the api is published on a different host than the frontend, otherwise
+  # CORS stays off (same-origin).
+  corsAllowedOrigins: []
+  # Rate limiting for login, share-link and invite redemption (SPEC.md §8).
+  # Counters live in Redis (redis.addr) so limits hold across replicas; if
+  # Redis is down it falls back to per-replica in-process counters.
+  rateLimit:
+    enabled: true
+    loginPerMinute: 10       # per client IP, POST /auth/login
+    publicPerMinute: 30      # per client IP, per endpoint class (share, invite, SSO)
+  # Prometheus /metrics on a dedicated port (api only: never routed through
+  # the ingress/HTTPRoute). Must differ from service.port. The ServiceMonitor
+  # below scrapes it.
+  metrics:
+    enabled: true
+    port: 9090
 
 # --- frontend service ---
 frontend:
@@ -159,6 +198,16 @@ frontend:
     pullPolicy: IfNotPresent
   service:
     port: 8080
+  # Runtime config served to the SPA as /config.js and folded into its
+  # Content-Security-Policy connect-src/img-src at container start. Left empty,
+  # the URLs are derived from ingress.{api,collab}.host (scheme from the tls
+  # toggle) or gatewayApi.{api,collab}.hostnames (https assumed); if neither is
+  # set the SPA uses same-origin /api/v1 and /collab. Set these to override.
+  # NOTE: a different api origin needs CORS on the api: see api.corsAllowedOrigins
+  # (derived automatically from the ingress/gateway hosts).
+  config:
+    apiBaseUrl: ""   # e.g. https://api.docs.example.com/api/v1
+    collabUrl: ""    # e.g. wss://collab.docs.example.com
   resources: {}
   autoscaling:
     enabled: false
@@ -178,6 +227,17 @@ collab:
     pullPolicy: IfNotPresent
   service:
     port: 1234
+  # Prometheus /metrics on a dedicated port (never routed through the
+  # ingress/HTTPRoute). Must differ from service.port.
+  metrics:
+    enabled: true
+    port: 9091
+  # Browser origins allowed to open the collab WebSocket (COLLAB_ALLOWED_ORIGINS;
+  # a handshake carrying any other Origin gets 403; no Origin = non-browser,
+  # left to token auth). Empty (default) = the frontend origin(s) derived from
+  # ingress.frontend.host / gatewayApi.frontend.hostnames; if those are unset
+  # too, no origin check.
+  allowedOrigins: []
   resources: {}
   autoscaling:
     enabled: false
@@ -244,10 +304,14 @@ observability:
     # Only created if the Prometheus Operator CRD is actually present in
     # the cluster (checked via .Capabilities in templates/servicemonitor.yaml)
     # AND this is enabled — the two are independent gates on purpose.
-    # NOTE: neither api nor collab serves /metrics yet (see NEXT.md) —
-    # enabling this today yields a failing scrape target.
+    # Scrapes api (`metrics` port, needs api.metrics.enabled) and collab
+    # (`metrics` port, path /metrics).
     enabled: false
     interval: 30s
   otel:
     enabled: false
-    endpoint: ""   # OTLP exporter endpoint, e.g. otel-collector.observability:4317
+    endpoint: ""   # OTLP exporter endpoint, e.g. http://otel-collector.observability:4318
+    # OTLP transport used by the api: "http/protobuf" (default; port 4318) or
+    # "grpc" (port 4317). Auth headers / TLS use the standard OTEL_EXPORTER_OTLP_*
+    # environment variables.
+    protocol: http/protobuf

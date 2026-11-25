@@ -84,7 +84,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := h.queries.GetPageByID(r.Context(), db.ToPgUUID(pageID))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return
 	}
 	identity := authctx.FromContext(r.Context())
@@ -114,7 +114,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 
 	page, err := h.queries.GetPageByID(r.Context(), db.ToPgUUID(pageID))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return
 	}
 	identity := authctx.FromContext(r.Context())
@@ -131,7 +131,17 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	// Cap the whole request body, not just the bytes read from the file
 	// part below: ParseMultipartForm otherwise spools an arbitrarily large
 	// body to a temp file on disk before any size check runs.
-	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.AttachmentMaxSizeBytes+multipartOverhead)
+	// The effective policy (Decision 17): the admin-set instance settings
+	// when present, else the deployment defaults from env/Helm.
+	settings, err := h.queries.GetInstanceSettings(r.Context())
+	if err != nil {
+		h.logger.Error("upload: reading instance settings failed", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "failed to load upload policy")
+		return
+	}
+	policy := EffectivePolicy(h.cfg, settings)
+
+	r.Body = http.MaxBytesReader(w, r.Body, policy.MaxSizeBytes+multipartOverhead)
 	if err := r.ParseMultipartForm(maxMultipartMemory); err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
@@ -155,7 +165,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 	// either direction is caught by the actual length below rather than by
 	// what the client claimed. This also gives storage.Put a seekable
 	// io.ReadSeeker, which the S3 SDK's request signing requires.
-	data, err := io.ReadAll(io.LimitReader(file, h.cfg.AttachmentMaxSizeBytes+1))
+	data, err := io.ReadAll(io.LimitReader(file, policy.MaxSizeBytes+1))
 	if err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "could not read upload: "+err.Error())
 		return
@@ -163,7 +173,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request) {
 
 	// Validate must see real file content, never the client's claimed
 	// Content-Type or the filename extension (SPEC.md §8).
-	contentType, err := Validate(data, int64(len(data)), h.cfg.AttachmentAllowlist, h.cfg.AttachmentMaxSizeBytes)
+	contentType, err := Validate(data, int64(len(data)), policy.Allowlist, policy.MaxSizeBytes)
 	if err != nil {
 		httpx.WriteError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -211,12 +221,12 @@ func (h *Handler) download(w http.ResponseWriter, r *http.Request) {
 
 	attachment, err := h.queries.GetAttachmentByID(r.Context(), db.ToPgUUID(attachmentID))
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "attachment not found")
+		httpx.WriteLookupError(w, h.logger, err, "attachment not found")
 		return
 	}
 	page, err := h.queries.GetPageByID(r.Context(), attachment.PageID)
 	if err != nil {
-		httpx.WriteError(w, http.StatusNotFound, "page not found")
+		httpx.WriteLookupError(w, h.logger, err, "page not found")
 		return
 	}
 	identity := authctx.FromContext(r.Context())

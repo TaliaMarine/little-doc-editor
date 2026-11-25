@@ -11,6 +11,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const addSpaceMemberGroup = `-- name: AddSpaceMemberGroup :one
+INSERT INTO space_members (space_id, group_id, role)
+VALUES ($1, $2, $3)
+ON CONFLICT (space_id, group_id) DO UPDATE SET role = $3
+RETURNING id, space_id, user_id, group_id, role, created_at
+`
+
+type AddSpaceMemberGroupParams struct {
+	SpaceID pgtype.UUID `json:"space_id"`
+	GroupID pgtype.UUID `json:"group_id"`
+	Role    SpaceRole   `json:"role"`
+}
+
+func (q *Queries) AddSpaceMemberGroup(ctx context.Context, arg AddSpaceMemberGroupParams) (SpaceMember, error) {
+	row := q.db.QueryRow(ctx, addSpaceMemberGroup, arg.SpaceID, arg.GroupID, arg.Role)
+	var i SpaceMember
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.UserID,
+		&i.GroupID,
+		&i.Role,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const addSpaceMemberUser = `-- name: AddSpaceMemberUser :one
 INSERT INTO space_members (space_id, user_id, role)
 VALUES ($1, $2, $3)
@@ -38,11 +65,115 @@ func (q *Queries) AddSpaceMemberUser(ctx context.Context, arg AddSpaceMemberUser
 	return i, err
 }
 
+const countSpaceOwners = `-- name: CountSpaceOwners :one
+SELECT count(*) FROM space_members WHERE space_id = $1 AND role = 'owner' AND user_id IS NOT NULL
+`
+
+// Direct (user) owners only: a group's membership changes with the IdP, so a
+// group owner can't be what keeps a space from being ownerless.
+func (q *Queries) CountSpaceOwners(ctx context.Context, spaceID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countSpaceOwners, spaceID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const getGroupByID = `-- name: GetGroupByID :one
+SELECT id, name, created_at FROM groups WHERE id = $1
+`
+
+func (q *Queries) GetGroupByID(ctx context.Context, id pgtype.UUID) (Group, error) {
+	row := q.db.QueryRow(ctx, getGroupByID, id)
+	var i Group
+	err := row.Scan(&i.ID, &i.Name, &i.CreatedAt)
+	return i, err
+}
+
+const getSpaceMemberGroup = `-- name: GetSpaceMemberGroup :one
+SELECT id, space_id, user_id, group_id, role, created_at FROM space_members WHERE space_id = $1 AND group_id = $2
+`
+
+type GetSpaceMemberGroupParams struct {
+	SpaceID pgtype.UUID `json:"space_id"`
+	GroupID pgtype.UUID `json:"group_id"`
+}
+
+func (q *Queries) GetSpaceMemberGroup(ctx context.Context, arg GetSpaceMemberGroupParams) (SpaceMember, error) {
+	row := q.db.QueryRow(ctx, getSpaceMemberGroup, arg.SpaceID, arg.GroupID)
+	var i SpaceMember
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.UserID,
+		&i.GroupID,
+		&i.Role,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getSpaceMemberUser = `-- name: GetSpaceMemberUser :one
+SELECT id, space_id, user_id, group_id, role, created_at FROM space_members WHERE space_id = $1 AND user_id = $2
+`
+
+type GetSpaceMemberUserParams struct {
+	SpaceID pgtype.UUID `json:"space_id"`
+	UserID  pgtype.UUID `json:"user_id"`
+}
+
+func (q *Queries) GetSpaceMemberUser(ctx context.Context, arg GetSpaceMemberUserParams) (SpaceMember, error) {
+	row := q.db.QueryRow(ctx, getSpaceMemberUser, arg.SpaceID, arg.UserID)
+	var i SpaceMember
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.UserID,
+		&i.GroupID,
+		&i.Role,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listGroups = `-- name: ListGroups :many
+SELECT id, name, created_at FROM groups
+WHERE ($2::text IS NULL OR name ILIKE '%' || $2::text || '%')
+ORDER BY lower(name)
+LIMIT $1
+`
+
+type ListGroupsParams struct {
+	Limit int32   `json:"limit"`
+	Q     *string `json:"q"`
+}
+
+func (q *Queries) ListGroups(ctx context.Context, arg ListGroupsParams) ([]Group, error) {
+	rows, err := q.db.Query(ctx, listGroups, arg.Limit, arg.Q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Group
+	for rows.Next() {
+		var i Group
+		if err := rows.Scan(&i.ID, &i.Name, &i.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSpaceMembers = `-- name: ListSpaceMembers :many
 SELECT sm.id, sm.space_id, sm.user_id, sm.group_id, sm.role, sm.created_at,
-       u.email AS user_email, u.display_name AS user_display_name
+       u.email AS user_email, u.display_name AS user_display_name,
+       g.name AS group_name
 FROM space_members sm
 LEFT JOIN users u ON u.id = sm.user_id
+LEFT JOIN groups g ON g.id = sm.group_id
 WHERE sm.space_id = $1
 ORDER BY sm.created_at
 `
@@ -56,6 +187,7 @@ type ListSpaceMembersRow struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UserEmail       *string            `json:"user_email"`
 	UserDisplayName *string            `json:"user_display_name"`
+	GroupName       *string            `json:"group_name"`
 }
 
 func (q *Queries) ListSpaceMembers(ctx context.Context, spaceID pgtype.UUID) ([]ListSpaceMembersRow, error) {
@@ -76,6 +208,7 @@ func (q *Queries) ListSpaceMembers(ctx context.Context, spaceID pgtype.UUID) ([]
 			&i.CreatedAt,
 			&i.UserEmail,
 			&i.UserDisplayName,
+			&i.GroupName,
 		); err != nil {
 			return nil, err
 		}
@@ -87,7 +220,24 @@ func (q *Queries) ListSpaceMembers(ctx context.Context, spaceID pgtype.UUID) ([]
 	return items, nil
 }
 
-const removeSpaceMemberUser = `-- name: RemoveSpaceMemberUser :exec
+const removeSpaceMemberGroup = `-- name: RemoveSpaceMemberGroup :execrows
+DELETE FROM space_members WHERE space_id = $1 AND group_id = $2
+`
+
+type RemoveSpaceMemberGroupParams struct {
+	SpaceID pgtype.UUID `json:"space_id"`
+	GroupID pgtype.UUID `json:"group_id"`
+}
+
+func (q *Queries) RemoveSpaceMemberGroup(ctx context.Context, arg RemoveSpaceMemberGroupParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeSpaceMemberGroup, arg.SpaceID, arg.GroupID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const removeSpaceMemberUser = `-- name: RemoveSpaceMemberUser :execrows
 DELETE FROM space_members WHERE space_id = $1 AND user_id = $2
 `
 
@@ -96,9 +246,69 @@ type RemoveSpaceMemberUserParams struct {
 	UserID  pgtype.UUID `json:"user_id"`
 }
 
-func (q *Queries) RemoveSpaceMemberUser(ctx context.Context, arg RemoveSpaceMemberUserParams) error {
-	_, err := q.db.Exec(ctx, removeSpaceMemberUser, arg.SpaceID, arg.UserID)
+func (q *Queries) RemoveSpaceMemberUser(ctx context.Context, arg RemoveSpaceMemberUserParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeSpaceMemberUser, arg.SpaceID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const syncUserGroups = `-- name: SyncUserGroups :exec
+WITH created AS (
+    INSERT INTO groups (name)
+    SELECT unnest($2::text[])
+    ON CONFLICT (name) DO NOTHING
+    RETURNING id
+), dropped AS (
+    DELETE FROM group_members
+    WHERE user_id = $1::uuid
+      AND group_id NOT IN (SELECT g.id FROM groups g WHERE g.name = ANY($2::text[]))
+)
+INSERT INTO group_members (group_id, user_id)
+SELECT id, $1::uuid FROM created
+UNION
+SELECT g.id, $1::uuid FROM groups g WHERE g.name = ANY($2::text[])
+ON CONFLICT DO NOTHING
+`
+
+type SyncUserGroupsParams struct {
+	UserID pgtype.UUID `json:"user_id"`
+	Names  []string    `json:"names"`
+}
+
+// Mirrors the IdP's group claim for one user in a single statement (atomic):
+// unknown groups are created, memberships the IdP no longer reports are
+// dropped, current ones added. Data-modifying CTEs share one snapshot, so
+// groups created here are picked up via the INSERT's RETURNING.
+func (q *Queries) SyncUserGroups(ctx context.Context, arg SyncUserGroupsParams) error {
+	_, err := q.db.Exec(ctx, syncUserGroups, arg.UserID, arg.Names)
 	return err
+}
+
+const updateSpaceMemberGroupRole = `-- name: UpdateSpaceMemberGroupRole :one
+UPDATE space_members SET role = $3 WHERE space_id = $1 AND group_id = $2
+RETURNING id, space_id, user_id, group_id, role, created_at
+`
+
+type UpdateSpaceMemberGroupRoleParams struct {
+	SpaceID pgtype.UUID `json:"space_id"`
+	GroupID pgtype.UUID `json:"group_id"`
+	Role    SpaceRole   `json:"role"`
+}
+
+func (q *Queries) UpdateSpaceMemberGroupRole(ctx context.Context, arg UpdateSpaceMemberGroupRoleParams) (SpaceMember, error) {
+	row := q.db.QueryRow(ctx, updateSpaceMemberGroupRole, arg.SpaceID, arg.GroupID, arg.Role)
+	var i SpaceMember
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.UserID,
+		&i.GroupID,
+		&i.Role,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const updateSpaceMemberRole = `-- name: UpdateSpaceMemberRole :one

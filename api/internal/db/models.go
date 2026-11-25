@@ -184,14 +184,15 @@ type HistoryCleanupLog struct {
 }
 
 type InstanceSetting struct {
-	ID                    bool               `json:"id"`
-	InternalLoginDisabled bool               `json:"internal_login_disabled"`
-	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	ID                     bool               `json:"id"`
+	InternalLoginDisabled  bool               `json:"internal_login_disabled"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	AttachmentAllowlist    []string           `json:"attachment_allowlist"`
+	AttachmentMaxSizeBytes *int64             `json:"attachment_max_size_bytes"`
 }
 
 type Invite struct {
 	ID               pgtype.UUID        `json:"id"`
-	Token            string             `json:"token"`
 	Email            *string            `json:"email"`
 	GrantsOrgAdmin   bool               `json:"grants_org_admin"`
 	CreatedByUserID  pgtype.UUID        `json:"created_by_user_id"`
@@ -199,6 +200,8 @@ type Invite struct {
 	RedeemedAt       pgtype.Timestamptz `json:"redeemed_at"`
 	RedeemedByUserID pgtype.UUID        `json:"redeemed_by_user_id"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	TokenHash        string             `json:"token_hash"`
+	RevokedAt        pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type Page struct {
@@ -226,6 +229,7 @@ type PageRevision struct {
 	AuthorUserID  pgtype.UUID        `json:"author_user_id"`
 	AuthorGuestID pgtype.UUID        `json:"author_guest_id"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	Title         *string            `json:"title"`
 }
 
 type Session struct {
@@ -235,6 +239,7 @@ type Session struct {
 	TokenHash       string             `json:"token_hash"`
 	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type ShareLink struct {

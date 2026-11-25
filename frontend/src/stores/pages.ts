@@ -1,7 +1,7 @@
 import type { Page as ApiPage, PageTreeItem as ApiPageTreeItem } from '@/api/generated'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { createPage as apiCreatePage, getPage, listPagesBySpace, updatePageContent } from '@/api/generated'
+import { createPage as apiCreatePage, deletePage as apiDeletePage, movePage as apiMovePage, getPage, listPagesBySpace, setPageLocked, updatePageContent } from '@/api/generated'
 
 export type PageTreeItem = ApiPageTreeItem
 export type Page = ApiPage
@@ -16,6 +16,9 @@ export const usePagesStore = defineStore('pages', () => {
   const treeLoading = ref(false)
   const pageLoading = ref(false)
   const currentPage = ref<Page | null>(null)
+  // Bumped to force the open editor to remount with a fresh live document
+  // (after a revision restore replaced the content server-side).
+  const editorEpoch = ref(0)
 
   async function fetchTree (spaceId: string) {
     treeLoading.value = true
@@ -61,10 +64,28 @@ export const usePagesStore = defineStore('pages', () => {
     return data
   }
 
-  async function createPage (spaceId: string, title: string, parentId: string | null) {
+  // Title only: `content` is omitted so the server leaves it alone. While a
+  // page is open in the live editor, content is owned by collab (Yjs) — a PUT
+  // carrying content would clobber live keystrokes.
+  async function renamePage (pageId: string, title: string) {
+    const { data, error } = await updatePageContent({ path: { pageId }, body: { title } })
+    if (error) {
+      throw new Error(error.error ?? 'Failed to save page')
+    }
+    if (currentPage.value?.id === pageId && data) {
+      currentPage.value = { ...currentPage.value, title: data.title }
+    }
+    return data
+  }
+
+  // With `templateKey` the server builds content (and the default title when
+  // `title` is empty); the body then must not carry `content`.
+  async function createPage (spaceId: string, title: string, parentId: string | null, templateKey?: string) {
     const { data, error } = await apiCreatePage({
       path: { spaceId },
-      body: { title, parentId, content: { type: 'doc', content: [] } },
+      body: templateKey
+        ? { title: title || undefined, parentId, templateKey }
+        : { title, parentId, content: { type: 'doc', content: [] } },
     })
     if (error) {
       throw new Error(error.error ?? 'Failed to create page')
@@ -73,5 +94,41 @@ export const usePagesStore = defineStore('pages', () => {
     return data
   }
 
-  return { treesBySpace, treeLoading, pageLoading, currentPage, fetchTree, fetchPage, savePage, createPage }
+  async function deletePage (spaceId: string, pageId: string) {
+    const { error } = await apiDeletePage({ path: { pageId } })
+    if (error) {
+      throw new Error(error.error ?? 'Failed to delete page')
+    }
+    if (currentPage.value?.id === pageId) {
+      currentPage.value = null
+    }
+    await fetchTree(spaceId)
+  }
+
+  async function setLocked (pageId: string, locked: boolean) {
+    const { data, error } = await setPageLocked({ path: { pageId }, body: { locked } })
+    if (error) {
+      throw new Error(error.error ?? 'Failed to change lock')
+    }
+    if (currentPage.value?.id === pageId && data) {
+      currentPage.value = { ...currentPage.value, locked: data.locked }
+    }
+    if (data) {
+      await fetchTree(data.space_id)
+    }
+    return data
+  }
+
+  // Reparent/reorder (editor+, members only). `position` is computed
+  // client-side (utils/pageMove.ts); the tree is refetched so every row's
+  // position stays authoritative.
+  async function movePage (spaceId: string, pageId: string, parentId: string | null, position: number) {
+    const { error } = await apiMovePage({ path: { pageId }, body: { parentId, position } })
+    if (error) {
+      throw new Error(error.error ?? 'Failed to move page')
+    }
+    await fetchTree(spaceId)
+  }
+
+  return { editorEpoch, movePage, deletePage, setLocked, treesBySpace, treeLoading, pageLoading, currentPage, fetchTree, fetchPage, savePage, renamePage, createPage }
 })

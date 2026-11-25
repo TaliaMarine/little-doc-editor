@@ -11,56 +11,98 @@ import (
 )
 
 type Querier interface {
+	AddSpaceMemberGroup(ctx context.Context, arg AddSpaceMemberGroupParams) (SpaceMember, error)
 	AddSpaceMemberUser(ctx context.Context, arg AddSpaceMemberUserParams) (SpaceMember, error)
+	// Atomically consumes a usable invite (not redeemed, not revoked, not
+	// expired), so two concurrent redemptions can't both win. Run inside the
+	// same transaction that creates the user, so a failed user insert (e.g. an
+	// email conflict) rolls the claim back.
+	ClaimInvite(ctx context.Context, tokenHash string) (Invite, error)
+	// Locked pages in a page's subtree (including the page itself).
+	CountLockedPagesInSubtree(ctx context.Context, id pgtype.UUID) (int64, error)
 	CountOrgAdmins(ctx context.Context) (int64, error)
+	// Direct (user) owners only: a group's membership changes with the IdP, so a
+	// group owner can't be what keeps a space from being ownerless.
+	CountSpaceOwners(ctx context.Context, spaceID pgtype.UUID) (int64, error)
 	CreateAttachment(ctx context.Context, arg CreateAttachmentParams) (Attachment, error)
 	CreateGuestIdentity(ctx context.Context, displayName string) (GuestIdentity, error)
 	CreateGuestSession(ctx context.Context, arg CreateGuestSessionParams) (Session, error)
+	CreateHistoryCleanupLog(ctx context.Context, arg CreateHistoryCleanupLogParams) error
 	// Used only for the bootstrap admin (Decision 11/14) — the first internal
 	// account, created directly as an org admin since there's no other admin
 	// yet to promote it.
 	CreateInternalOrgAdmin(ctx context.Context, arg CreateInternalOrgAdminParams) (User, error)
 	CreateInternalUser(ctx context.Context, arg CreateInternalUserParams) (User, error)
+	// token_hash is the hex SHA-256 of the bearer token; the plaintext is never stored.
 	CreateInvite(ctx context.Context, arg CreateInviteParams) (Invite, error)
 	CreateOIDCUser(ctx context.Context, arg CreateOIDCUserParams) (User, error)
 	CreatePage(ctx context.Context, arg CreatePageParams) (Page, error)
+	// one past exportapi's page cap
+	// clock_timestamp(), not the column default now(): several revisions can be
+	// written in one transaction (save + preserved state, restore) and must keep
+	// their order, but now() is constant within a transaction.
 	CreatePageRevision(ctx context.Context, arg CreatePageRevisionParams) (PageRevision, error)
 	CreateShareLink(ctx context.Context, arg CreateShareLinkParams) (ShareLink, error)
 	CreateShareLinkAccessLog(ctx context.Context, arg CreateShareLinkAccessLogParams) (ShareLinkAccessLog, error)
 	CreateSpace(ctx context.Context, arg CreateSpaceParams) (Space, error)
 	CreateUserSession(ctx context.Context, arg CreateUserSessionParams) (Session, error)
+	DeleteExpiredSessions(ctx context.Context) (int64, error)
+	DeletePage(ctx context.Context, id pgtype.UUID) error
+	DeleteSpace(ctx context.Context, id pgtype.UUID) error
 	GetAttachmentByID(ctx context.Context, id pgtype.UUID) (Attachment, error)
 	GetCollabDocumentState(ctx context.Context, pageID pgtype.UUID) (CollabDocument, error)
+	GetGroupByID(ctx context.Context, id pgtype.UUID) (Group, error)
 	GetGuestIdentityByID(ctx context.Context, id pgtype.UUID) (GuestIdentity, error)
 	GetInstanceSettings(ctx context.Context) (InstanceSetting, error)
-	GetInviteByToken(ctx context.Context, token string) (Invite, error)
+	GetInviteByID(ctx context.Context, id pgtype.UUID) (Invite, error)
+	GetInviteByTokenHash(ctx context.Context, tokenHash string) (Invite, error)
+	GetLatestPageRevision(ctx context.Context, pageID pgtype.UUID) (PageRevision, error)
 	GetMaxChildPagePosition(ctx context.Context, arg GetMaxChildPagePositionParams) (float64, error)
 	// Used by create to append a new root page after existing siblings, rather
 	// than leaving every page at the position column's zero default (which
 	// made ListPagesBySpace's ordering meaningless — every row tied at 0).
 	GetMaxRootPagePosition(ctx context.Context, spaceID pgtype.UUID) (float64, error)
 	GetPageByID(ctx context.Context, id pgtype.UUID) (Page, error)
+	// Row-locks the page inside a transaction (writers lock the page row first).
+	GetPageByIDForUpdate(ctx context.Context, id pgtype.UUID) (Page, error)
+	GetPageRevision(ctx context.Context, arg GetPageRevisionParams) (GetPageRevisionRow, error)
 	GetShareLinkByID(ctx context.Context, id pgtype.UUID) (ShareLink, error)
 	GetShareLinkByToken(ctx context.Context, token string) (ShareLink, error)
 	GetSpaceByID(ctx context.Context, id pgtype.UUID) (Space, error)
 	GetSpaceBySlug(ctx context.Context, slug string) (Space, error)
+	GetSpaceMemberGroup(ctx context.Context, arg GetSpaceMemberGroupParams) (SpaceMember, error)
+	// Highest of the user's direct role and any role granted to a group they
+	// belong to (enum order: owner first). collab/src/access.ts must use the
+	// same rule.
 	GetSpaceMemberRole(ctx context.Context, arg GetSpaceMemberRoleParams) (SpaceRole, error)
+	GetSpaceMemberUser(ctx context.Context, arg GetSpaceMemberUserParams) (SpaceMember, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByEmailAnyProvider(ctx context.Context, lower string) (User, error)
 	GetUserByID(ctx context.Context, id pgtype.UUID) (User, error)
 	GetUserByOIDCIdentity(ctx context.Context, arg GetUserByOIDCIdentityParams) (User, error)
+	// Deny-list lookup used by authctx.Middleware on every request.
+	IsSessionRevoked(ctx context.Context, tokenHash string) (bool, error)
 	// Org admins can see every space regardless of membership (SPEC.md §6.5) —
 	// this is the admin-only counterpart to ListSpacesForUser.
 	ListAllSpaces(ctx context.Context) ([]Space, error)
+	// S3 keys of every attachment on a page and its descendants, collected before
+	// a delete cascades the rows away so the blobs can be removed too.
+	ListAttachmentKeysForPageTree(ctx context.Context, id pgtype.UUID) ([]string, error)
+	ListAttachmentKeysForSpace(ctx context.Context, spaceID pgtype.UUID) ([]string, error)
 	ListAttachmentsForPage(ctx context.Context, pageID pgtype.UUID) ([]Attachment, error)
 	ListChildPages(ctx context.Context, arg ListChildPagesParams) ([]Page, error)
-	ListInvites(ctx context.Context) ([]Invite, error)
+	ListGroups(ctx context.Context, arg ListGroupsParams) ([]Group, error)
+	ListInvites(ctx context.Context) ([]ListInvitesRow, error)
 	// Share-link scope defaults to the page and its descendants (Decision 21).
 	// Recursive CTE walking parent_id — fine at this schema's expected page-tree
 	// depth/fanout; revisit with a materialized path/closure table if a space
 	// ever has pathologically deep trees.
 	ListPageDescendantIDs(ctx context.Context, id pgtype.UUID) ([]pgtype.UUID, error)
-	ListPageRevisions(ctx context.Context, pageID pgtype.UUID) ([]PageRevision, error)
+	// History list: metadata only (no content, which can be large).
+	ListPageRevisions(ctx context.Context, arg ListPageRevisionsParams) ([]ListPageRevisionsRow, error)
+	// A page and all its descendants with content, for export. Depth-first
+	// ordering is reconstructed in Go from parent_id/position.
+	ListPageSubtree(ctx context.Context, id pgtype.UUID) ([]ListPageSubtreeRow, error)
 	// Backs the page-tree sidebar nav (SPEC.md §5): the whole space's pages in
 	// one flat query, ordered by position — the frontend reconstructs the tree
 	// from parent_id client-side rather than this being N per-level round trips.
@@ -70,32 +112,65 @@ type Querier interface {
 	// both still at the column default before ever being reordered).
 	ListPagesBySpace(ctx context.Context, spaceID pgtype.UUID) ([]ListPagesBySpaceRow, error)
 	ListRootPages(ctx context.Context, spaceID pgtype.UUID) ([]Page, error)
-	ListShareLinkAccessLogs(ctx context.Context, shareLinkID pgtype.UUID) ([]ShareLinkAccessLog, error)
+	ListShareLinkAccessLogs(ctx context.Context, arg ListShareLinkAccessLogsParams) ([]ListShareLinkAccessLogsRow, error)
 	ListShareLinksForPage(ctx context.Context, pageID pgtype.UUID) ([]ShareLink, error)
 	ListSpaceMembers(ctx context.Context, spaceID pgtype.UUID) ([]ListSpaceMembersRow, error)
-	// Direct membership only; group-based membership is resolved by joining
-	// group_members separately where needed, kept out of this query to avoid
-	// silently doubling a user's effective role via both paths. Returns the
-	// member's role too, so the list can report my_role without N lookups.
+	// one past exportapi's page cap, so an oversized export is refused without loading it all
+	ListSpacePagesForExport(ctx context.Context, spaceID pgtype.UUID) ([]ListSpacePagesForExportRow, error)
+	// Direct and group-derived membership, at the highest role per space (the
+	// space_role enum is declared owner < admin < editor < viewer, so min() is
+	// the most privileged). Returns the role too, so the list can report my_role
+	// without N lookups.
 	ListSpacesForUser(ctx context.Context, userID pgtype.UUID) ([]ListSpacesForUserRow, error)
-	PruneRevisionsBeyondAge(ctx context.Context, arg PruneRevisionsBeyondAgeParams) ([]PruneRevisionsBeyondAgeRow, error)
-	// Deletes revisions beyond the space's history_max_count, keeping the most
-	// recent N. Returns deleted rows so the caller can log deleted_count and the
-	// oldest/newest deleted_at only when this actually deletes something
-	// (Decision 9) — a zero-row result must not produce a history_cleanup_logs entry.
-	PruneRevisionsBeyondCount(ctx context.Context, arg PruneRevisionsBeyondCountParams) ([]PruneRevisionsBeyondCountRow, error)
-	RedeemInvite(ctx context.Context, arg RedeemInviteParams) error
-	RemoveSpaceMemberUser(ctx context.Context, arg RemoveSpaceMemberUserParams) error
+	ListSpacesWithHistoryPolicy(ctx context.Context) ([]Space, error)
+	// Org-admin user directory. q (optional) filters by email/display name.
+	ListUsers(ctx context.Context, arg ListUsersParams) ([]ListUsersRow, error)
+	// Transaction-scoped advisory lock serializing changes that could remove the
+	// last enabled org admin.
+	LockOrgAdminChanges(ctx context.Context) error
+	// Serializes member-management changes (last-owner guard) within a transaction.
+	LockSpace(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
+	// Serializes concurrent admin changes (last-org-admin guard) on one user row.
+	LockUserRow(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
+	// One space's lifecycle policy (Decision 9): a revision is deleted when it is
+	// beyond the newest max_count of its page OR older than max_age_days —
+	// whichever threshold is hit first. NULL means no limit on that dimension.
+	// The newest revision of each page is never age-pruned, so an idle page keeps
+	// its last known state (and a later save doesn't need a synthetic baseline).
+	// Returns the deleted rows so the caller logs only when something was
+	// actually deleted.
+	PruneSpaceRevisions(ctx context.Context, arg PruneSpaceRevisionsParams) ([]PruneSpaceRevisionsRow, error)
+	RemoveSpaceMemberGroup(ctx context.Context, arg RemoveSpaceMemberGroupParams) (int64, error)
+	RemoveSpaceMemberUser(ctx context.Context, arg RemoveSpaceMemberUserParams) (int64, error)
+	// Only a still-pending invite can be revoked; returns no row otherwise.
+	RevokeInvite(ctx context.Context, id pgtype.UUID) (Invite, error)
+	// Logout. Upserts so a token whose login-time row was never recorded (the
+	// recording is best-effort) can still be revoked.
+	RevokeSession(ctx context.Context, arg RevokeSessionParams) error
 	RevokeShareLink(ctx context.Context, id pgtype.UUID) error
+	// Enabled users that are not yet a direct member of the space — the picker a
+	// space admin uses to add a member (no org-admin rights needed).
+	SearchMemberCandidates(ctx context.Context, arg SearchMemberCandidatesParams) ([]SearchMemberCandidatesRow, error)
 	// Postgres FTS behind the Go layer's SearchIndexer/SearchQuerier interface
 	// (Decision 2, SPEC.md §6.8) — this query is an implementation detail of
 	// that interface, not called directly from handlers. Projects only what a
 	// search result needs — SELECT * would pull every matching page's full
 	// content jsonb and search_vector just to discard them.
 	SearchPages(ctx context.Context, arg SearchPagesParams) ([]SearchPagesRow, error)
-	SetInternalLoginDisabled(ctx context.Context, internalLoginDisabled bool) (InstanceSetting, error)
+	SetInviteRedeemedBy(ctx context.Context, arg SetInviteRedeemedByParams) error
+	SetPageLocked(ctx context.Context, arg SetPageLockedParams) (Page, error)
 	SetUserDisabled(ctx context.Context, arg SetUserDisabledParams) error
+	// Mirrors the IdP's group claim for one user in a single statement (atomic):
+	// unknown groups are created, memberships the IdP no longer reports are
+	// dropped, current ones added. Data-modifying CTEs share one snapshot, so
+	// groups created here are picked up via the INSERT's RETURNING.
+	SyncUserGroups(ctx context.Context, arg SyncUserGroupsParams) error
 	TouchUserLogin(ctx context.Context, id pgtype.UUID) error
+	// One statement so a PATCH touching several settings applies all or none. Each
+	// field changes only when its set_* flag is true; for the attachment policy a
+	// NULL value with the flag set resets that field to the deployment default
+	// (Decision 17).
+	UpdateInstanceSettings(ctx context.Context, arg UpdateInstanceSettingsParams) (InstanceSetting, error)
 	// Applied on every OIDC login: the IdP is the source of truth for the display
 	// name, profile fields, group membership and (via the admin group) org admin.
 	UpdateOIDCUserProfile(ctx context.Context, arg UpdateOIDCUserProfileParams) (User, error)
@@ -109,6 +184,13 @@ type Querier interface {
 	// kept behind that interface rather than triggered in SQL so a future swap
 	// to Meilisearch/Typesense only touches the Go layer.
 	UpdatePageSearchVector(ctx context.Context, arg UpdatePageSearchVectorParams) error
+	// Title-only rename: never touches content, so it can't clobber live
+	// collaborative state (collab owns content while a doc is open).
+	UpdatePageTitle(ctx context.Context, arg UpdatePageTitleParams) (Page, error)
+	// Each field is applied only when its set_* flag is true, so a PATCH can
+	// distinguish "leave alone" from "set to null" (no limit).
+	UpdateSpace(ctx context.Context, arg UpdateSpaceParams) (Space, error)
+	UpdateSpaceMemberGroupRole(ctx context.Context, arg UpdateSpaceMemberGroupRoleParams) (SpaceMember, error)
 	UpdateSpaceMemberRole(ctx context.Context, arg UpdateSpaceMemberRoleParams) (SpaceMember, error)
 	UpsertCollabDocumentState(ctx context.Context, arg UpsertCollabDocumentStateParams) error
 	// Only called when DEV_AUTH_BYPASS is enabled (see internal/authctx), to

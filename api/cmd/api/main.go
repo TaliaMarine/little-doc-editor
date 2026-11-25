@@ -16,10 +16,12 @@ import (
 	"github.com/TaliaMarine/little-doc-editor/api/internal/authz"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/config"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/db"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/historycleanup"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/oidcapi"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/passwordhash"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/server"
 	"github.com/TaliaMarine/little-doc-editor/api/internal/storage"
+	"github.com/TaliaMarine/little-doc-editor/api/internal/telemetry"
 )
 
 // devAdminUserID must match authctx's localDevAdminUserID — kept as a
@@ -64,6 +66,25 @@ func run() error {
 
 	queries := db.New(pool)
 
+	shutdownTracing, err := telemetry.Init(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if cfg.OTelEndpoint != "" {
+		logger.Info("OTLP tracing enabled", "protocol", cfg.OTelProtocol)
+	}
+	defer func() {
+		tctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTracing(tctx)
+	}()
+	if err := telemetry.RegisterPool(pool); err != nil {
+		return err
+	}
+	if cfg.InternalLoginBreakGlass {
+		logger.Warn("INTERNAL_LOGIN_BREAK_GLASS is on: the bootstrap admin can sign in with a password even if internal login is disabled", "email", cfg.BootstrapAdminEmail)
+	}
+
 	if cfg.DevAuthBypass {
 		if err := seedDevAdminUser(ctx, queries); err != nil {
 			return err
@@ -98,7 +119,27 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	stopCleanup, err := historycleanup.New(pool, logger).Start(cfg.HistoryCleanupSchedule)
+	if err != nil {
+		return err
+	}
+	defer stopCleanup()
+
 	errCh := make(chan error, 1)
+	var metricsSrv *http.Server
+	if cfg.MetricsAddr != "" {
+		// Separate listener: /metrics is never reachable through the public
+		// ingress, which only routes the main port (Decision 27).
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", telemetry.MetricsHandler())
+		metricsSrv = &http.Server{Addr: cfg.MetricsAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() {
+			logger.Info("metrics listening", "addr", cfg.MetricsAddr)
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+	}
 	go func() {
 		logger.Info("listening", "addr", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -113,6 +154,9 @@ func run() error {
 		logger.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		if metricsSrv != nil {
+			_ = metricsSrv.Shutdown(shutdownCtx)
+		}
 		return srv.Shutdown(shutdownCtx)
 	}
 }

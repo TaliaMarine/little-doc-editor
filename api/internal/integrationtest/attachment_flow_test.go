@@ -51,6 +51,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 		t.Skip("DATABASE_URL not set — run via `make test-integration` / `just test-integration` after `docker compose up -d`")
 	}
 
+	t.Setenv("RATE_LIMIT_ENABLED", "false") // the limiter has its own test
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("config.Load: %v (integration tests need DEV_AUTH_BYPASS=true and S3_* set — see DEVELOPER.md)", err)

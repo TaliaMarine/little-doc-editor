@@ -21,24 +21,61 @@ func (q *Queries) CountOrgAdmins(ctx context.Context) (int64, error) {
 }
 
 const getInstanceSettings = `-- name: GetInstanceSettings :one
-SELECT id, internal_login_disabled, updated_at FROM instance_settings WHERE id = true
+SELECT id, internal_login_disabled, updated_at, attachment_allowlist, attachment_max_size_bytes FROM instance_settings WHERE id = true
 `
 
 func (q *Queries) GetInstanceSettings(ctx context.Context) (InstanceSetting, error) {
 	row := q.db.QueryRow(ctx, getInstanceSettings)
 	var i InstanceSetting
-	err := row.Scan(&i.ID, &i.InternalLoginDisabled, &i.UpdatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.InternalLoginDisabled,
+		&i.UpdatedAt,
+		&i.AttachmentAllowlist,
+		&i.AttachmentMaxSizeBytes,
+	)
 	return i, err
 }
 
-const setInternalLoginDisabled = `-- name: SetInternalLoginDisabled :one
-UPDATE instance_settings SET internal_login_disabled = $1, updated_at = now() WHERE id = true
-RETURNING id, internal_login_disabled, updated_at
+const updateInstanceSettings = `-- name: UpdateInstanceSettings :one
+UPDATE instance_settings SET
+    internal_login_disabled   = CASE WHEN $1::boolean THEN $2::boolean ELSE internal_login_disabled END,
+    attachment_allowlist      = CASE WHEN $3::boolean THEN $4::text[] ELSE attachment_allowlist END,
+    attachment_max_size_bytes = CASE WHEN $5::boolean THEN $6::bigint ELSE attachment_max_size_bytes END,
+    updated_at = now()
+WHERE id = true
+RETURNING id, internal_login_disabled, updated_at, attachment_allowlist, attachment_max_size_bytes
 `
 
-func (q *Queries) SetInternalLoginDisabled(ctx context.Context, internalLoginDisabled bool) (InstanceSetting, error) {
-	row := q.db.QueryRow(ctx, setInternalLoginDisabled, internalLoginDisabled)
+type UpdateInstanceSettingsParams struct {
+	SetInternalLogin      bool     `json:"set_internal_login"`
+	InternalLoginDisabled bool     `json:"internal_login_disabled"`
+	SetAllowlist          bool     `json:"set_allowlist"`
+	Allowlist             []string `json:"allowlist"`
+	SetMaxSize            bool     `json:"set_max_size"`
+	MaxSizeBytes          *int64   `json:"max_size_bytes"`
+}
+
+// One statement so a PATCH touching several settings applies all or none. Each
+// field changes only when its set_* flag is true; for the attachment policy a
+// NULL value with the flag set resets that field to the deployment default
+// (Decision 17).
+func (q *Queries) UpdateInstanceSettings(ctx context.Context, arg UpdateInstanceSettingsParams) (InstanceSetting, error) {
+	row := q.db.QueryRow(ctx, updateInstanceSettings,
+		arg.SetInternalLogin,
+		arg.InternalLoginDisabled,
+		arg.SetAllowlist,
+		arg.Allowlist,
+		arg.SetMaxSize,
+		arg.MaxSizeBytes,
+	)
 	var i InstanceSetting
-	err := row.Scan(&i.ID, &i.InternalLoginDisabled, &i.UpdatedAt)
+	err := row.Scan(
+		&i.ID,
+		&i.InternalLoginDisabled,
+		&i.UpdatedAt,
+		&i.AttachmentAllowlist,
+		&i.AttachmentMaxSizeBytes,
+	)
 	return i, err
 }

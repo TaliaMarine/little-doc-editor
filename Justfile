@@ -74,6 +74,35 @@ lint:
     cd frontend && npm run type-check
     cd collab && npm run typecheck
 
+# --- Demo data + README screenshots (see DEVELOPER.md "Demo data and screenshots") ---
+# A separate database (lde_demo) and real auth, so none of this touches your dev data
+# and the seeded users/roles are enforced for real.
+
+# Override with DEMO_DB=<name> to use another database (e.g. a second checkout's stack).
+demo_db := env_var_or_default("DEMO_DB", "lde_demo")
+demo_database_url := "postgres://postgres:postgres@localhost:5432/" + demo_db + "?sslmode=disable"
+
+# Create the lde_demo database (if missing) and migrate it. Needs `just up`.
+demo-migrate:
+    docker compose exec -T postgres psql -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='{{demo_db}}'" | grep -q 1 || docker compose exec -T postgres psql -U postgres -c "CREATE DATABASE {{demo_db}}"
+    cd api && DATABASE_URL="{{demo_database_url}}" go run ./cmd/migrate -direction up
+
+# api against lde_demo with real auth (bootstrap admin admin@demo.example), history debounce and rate limiting off.
+demo-api:
+    cd api && DATABASE_URL="{{demo_database_url}}" REDIS_ADDR="{{redis_addr}}" DEV_AUTH_BYPASS=false SESSION_JWT_SECRET="{{session_secret}}" BOOTSTRAP_ADMIN_EMAIL=admin@demo.example BOOTSTRAP_ADMIN_PASSWORD=demo-admin-password RATE_LIMIT_ENABLED=false HISTORY_REVISION_DEBOUNCE=0 {{s3_env}} go run ./cmd/api
+
+demo-collab:
+    cd collab && DATABASE_URL="{{demo_database_url}}" REDIS_ADDR="{{redis_addr}}" SESSION_JWT_SECRET="{{session_secret}}" npm run dev
+
+# Fill the running demo-api with fictional spaces, pages, users, attachments and a share link. Safe to re-run.
+demo-seed:
+    node scripts/seed-demo/seed.mjs
+
+# Regenerate docs/screenshots/*.png (needs `just up`, demo-migrate, demo-api, demo-collab, frontend running, then demo-seed).
+screenshots:
+    cd scripts/screenshots && npm install --no-audit --no-fund && npx playwright install chromium
+    node scripts/screenshots/shoot.mjs
+
 # --- Helm chart ---
 
 chart-lint:

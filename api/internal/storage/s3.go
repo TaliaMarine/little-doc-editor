@@ -25,6 +25,8 @@ import (
 type Storage interface {
 	Put(ctx context.Context, key, contentType string, body io.Reader, size int64) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
+	// Delete removes an object; deleting a missing key is not an error.
+	Delete(ctx context.Context, key string) error
 }
 
 // Open returns the backend selected by cfg.StorageBackend.
@@ -96,4 +98,12 @@ func (s *S3Storage) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 		return nil, fmt.Errorf("fetching %q: %w", key, err)
 	}
 	return out.Body, nil
+}
+
+func (s *S3Storage) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	if err != nil {
+		return fmt.Errorf("deleting %q: %w", key, err)
+	}
+	return nil
 }
