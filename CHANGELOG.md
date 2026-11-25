@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/TaliaMarine/little-doc-editor/compare/v0.3.1...v0.4.0) (2026-11-25)
+
+
+### Features
+
+* finish v1 scope (accounts, live collab, attachments, sharing, history, export, PWA, hardening, docs) ([4fda950](https://github.com/TaliaMarine/little-doc-editor/commit/4fda95044ed534796dfe4ccc9daec337095905d0))
+
 ## [0.3.1](https://github.com/TaliaMarine/little-doc-editor/compare/v0.3.0...v0.3.1) (2026-11-23)
 
 
